@@ -30,5 +30,20 @@ node scripts/fix_openapi.mjs "$OPENAPI_OUT"
 echo "==> spectral lint: $OPENAPI_OUT"
 npx --yes @stoplight/spectral-cli lint "$OPENAPI_OUT" --fail-severity=error
 
-echo "==> oas_generator: invoke via dev module (added in task 04)"
-# gleam run -m notion_client/dev/regen
+echo "==> truncate prior facade in src/notion_client.gleam (so dev module compiles)"
+node -e "const fs=require('fs');const p='src/notion_client.gleam';const s=fs.readFileSync(p,'utf8');const m=s.match(/^.*?\/\/ GENERATED[^\n]*\n/s);if(!m)throw new Error('marker missing');fs.writeFileSync(p,m[0]);"
+
+echo "==> oas_generator: gleam run -m notion_client/dev"
+gleam run -m notion_client/dev
+
+echo "==> truncate generated facade in src/notion_client.gleam (BEAM keeps stub only)"
+node -e "const fs=require('fs');const p='src/notion_client.gleam';const s=fs.readFileSync(p,'utf8');const m=s.match(/^.*?\/\/ GENERATED[^\n]*\n/s);if(!m)throw new Error('marker missing');fs.writeFileSync(p,m[0]);"
+
+echo "==> patch utils import: oas/generator/utils -> notion_client/internal/utils"
+node -e "const fs=require('fs');for(const p of ['src/notion_client/operations.gleam','src/notion_client/schema.gleam']){const s=fs.readFileSync(p,'utf8');fs.writeFileSync(p,s.replace(/import oas\/generator\/utils/g,'import notion_client/internal/utils'));}"
+
+echo "==> dedupe Anon types/encoders/decoders"
+node scripts/dedupe_anons.mjs src/notion_client/operations.gleam
+
+echo "==> gleam build"
+gleam build
