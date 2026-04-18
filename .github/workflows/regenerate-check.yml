@@ -1,0 +1,35 @@
+name: regenerate-check
+
+# Fails when committed spec/codegen drift from `bash scripts/regenerate.sh`.
+# Mirrors the README "Regenerating the SDK" section.
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  regenerate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "28"
+          gleam-version: "1.15.4"
+          rebar3-version: "3"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo install --locked --version 1.2.1 postman2openapi-cli
+      - run: gleam deps download
+      - run: bash scripts/regenerate.sh
+      - name: fail on regen drift
+        run: |
+          if ! git diff --quiet -- openapi.json src/notion_client; then
+            echo "::error::regenerate.sh produced uncommitted changes — run it locally and commit the result"
+            git --no-pager diff --stat -- openapi.json src/notion_client
+            git --no-pager diff -- openapi.json src/notion_client | head -200
+            exit 1
+          fi

@@ -45,5 +45,8 @@ node -e "const fs=require('fs');for(const p of ['src/notion_client/operations.gl
 echo "==> dedupe Anon types/encoders/decoders"
 node scripts/dedupe_anons.mjs src/notion_client/operations.gleam
 
+echo "==> gleam format (deterministic output: imports + line wrapping)"
+gleam format
+
 echo "==> gleam build"
 gleam build
