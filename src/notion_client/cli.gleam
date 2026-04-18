@@ -4,6 +4,7 @@
 //// notion_client read <page_id> [--write-file] [--max-depth N] [--inline-synced] [--full-properties]
 //// notion_client append <page_id> <markdown>
 //// notion_client append <page_id> --from-file <path>
+//// notion_client update <page_id> --from-file <path>
 //// ```
 ////
 //// Env: `NOTION_TOKEN` (required), `NOTION_API_VERSION` (optional).
@@ -27,6 +28,7 @@ import notion_client.{type Client}
 import notion_client/error.{type NotionError}
 import notion_client/markdown.{type Block}
 import notion_client/properties
+import notion_client/yaml
 import simplifile
 
 pub fn main() -> Nil {
@@ -34,6 +36,7 @@ pub fn main() -> Nil {
     ["read", page_id, ..rest] -> cmd_read(page_id, rest)
     ["append", page_id, "--from-file", path] -> cmd_append_file(page_id, path)
     ["append", page_id, body] -> cmd_append_text(page_id, body)
+    ["update", page_id, "--from-file", path] -> cmd_update_file(page_id, path)
     _ -> print_help()
   }
 }
@@ -44,6 +47,7 @@ fn print_help() -> Nil {
   notion_client read <page_id> [--write-file] [--max-depth N] [--inline-synced] [--full-properties]
   notion_client append <page_id> <markdown>
   notion_client append <page_id> --from-file <path>
+  notion_client update <page_id> --from-file <path>
 
 Env: NOTION_TOKEN required.",
   )
@@ -358,6 +362,52 @@ fn cmd_append_file(page_id: String, path: String) -> Nil {
 
 fn do_append(client: Client, page_id: String, md: String) -> Result(Nil, String) {
   apply_segments(client, page_id, markdown.segment_markdown(md))
+}
+
+// ─── update ────────────────────────────────────────────────────────────
+
+fn cmd_update_file(page_id: String, path: String) -> Nil {
+  case simplifile.read(path) {
+    Error(e) -> die("read " <> path <> ": " <> simplifile.describe_error(e))
+    Ok(contents) ->
+      case with_client(fn(c) { do_update(c, page_id, contents) }) {
+        Ok(_) -> io.println("updated")
+        Error(msg) -> die(msg)
+      }
+  }
+}
+
+fn do_update(
+  client: Client,
+  page_id: String,
+  contents: String,
+) -> Result(Nil, String) {
+  let #(maybe_yaml, body) = yaml.split_frontmatter(contents)
+  use _ <- result.try(case maybe_yaml {
+    None -> Ok(Nil)
+    Some(y) -> patch_properties(client, page_id, y)
+  })
+  case string.trim(body) {
+    "" -> Ok(Nil)
+    _ -> do_append(client, page_id, body)
+  }
+}
+
+fn patch_properties(
+  client: Client,
+  page_id: String,
+  y: yaml.Yaml,
+) -> Result(Nil, String) {
+  use page <- result.try(fetch_page(client, page_id))
+  let #(body, notes) = properties.build_patch(page, y)
+  list.each(notes, io.println_error)
+  let req =
+    notion_client.base_request(client)
+    |> request.set_method(http.Patch)
+    |> request.set_path("/v1/pages/" <> page_id)
+    |> request.set_body(<<json.to_string(body):utf8>>)
+  use _ <- result.try(send(client, req))
+  Ok(Nil)
 }
 
 fn apply_segments(

@@ -1,19 +1,26 @@
-//// YAML frontmatter renderer for database-row page properties.
+//// YAML frontmatter renderer + inverse patch builder for database-row
+//// page properties.
 ////
-//// Takes a decoded page JSON (as Dynamic, from `/v1/pages/{id}`) and
-//// emits the front-of-markdown YAML block per
-//// `specs/v2-markdown-extensions.md` §8. Returns `None` if the page
-//// is not a database row (no `database_id` / `data_source_id` parent).
+//// - `render_frontmatter` takes a decoded page JSON (Dynamic, from
+////   `/v1/pages/{id}`) and emits the front-of-markdown YAML block per
+////   `specs/v2-markdown-extensions.md` §8. Returns `None` for non-DB
+////   pages.
+//// - `build_patch` takes the same page JSON plus a parsed YAML tree
+////   (`notion_client/yaml`) and emits a PATCH body shaped
+////   `{ properties: { … } }` plus a list of notes for read-only /
+////   unknown-typed keys that were skipped.
 
 import gleam/dict
 import gleam/dynamic.{type Dynamic}
 import gleam/dynamic/decode
 import gleam/float
 import gleam/int
+import gleam/json.{type Json}
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
+import notion_client/yaml.{type Yaml}
 
 // ─── Value tree ─────────────────────────────────────────────────────────
 
@@ -542,4 +549,287 @@ fn quote_string(s: String) -> String {
     |> string.replace("\"", "\\\"")
     |> string.replace("\n", "\\n")
   "\"" <> escaped <> "\""
+}
+
+// ─── Reverse: Yaml → Notion property PATCH JSON ────────────────────────
+
+/// Build a `{ properties: { … } }` PATCH body from a parsed YAML tree.
+///
+/// `page` is the current page JSON (GET /v1/pages/{id}); used to look
+/// up each property's `type` so values from YAML can be reshaped
+/// correctly. Returns the JSON payload and a list of notes for
+/// properties that were silently dropped (read-only type, unknown
+/// property name, or unusable value shape).
+pub fn build_patch(page: Dynamic, y: Yaml) -> #(Json, List(String)) {
+  let type_map = case decode.run(page, property_types_decoder()) {
+    Ok(m) -> m
+    Error(_) -> dict.new()
+  }
+  let title_prop_name = find_title_property(type_map)
+  let entries_from_props = case yaml.get(y, "properties") {
+    Some(pm) -> yaml.map_entries(pm)
+    None -> []
+  }
+  let entries_with_title = case yaml.get(y, "title"), title_prop_name {
+    Some(v), Some(name) -> [#(name, v), ..entries_from_props]
+    _, _ -> entries_from_props
+  }
+  let #(json_pairs, notes) =
+    list.fold(entries_with_title, #([], []), fn(acc, entry) {
+      let #(pairs, log) = acc
+      let #(name, value) = entry
+      case dict.get(type_map, name) {
+        Error(_) -> #(pairs, ["skip \"" <> name <> "\": not on page", ..log])
+        Ok(kind) ->
+          case build_one(kind, value) {
+            Skip(note) -> #(pairs, ["skip \"" <> name <> "\": " <> note, ..log])
+            Emit(j) -> #([#(name, j), ..pairs], log)
+          }
+      }
+    })
+  let body =
+    json.object([
+      #("properties", json.object(list.reverse(json_pairs))),
+    ])
+  #(body, list.reverse(notes))
+}
+
+type Emit {
+  Emit(json: Json)
+  Skip(note: String)
+}
+
+fn property_types_decoder() -> decode.Decoder(dict.Dict(String, String)) {
+  use props <- decode.field(
+    "properties",
+    decode.dict(decode.string, type_tag_decoder()),
+  )
+  decode.success(props)
+}
+
+fn find_title_property(m: dict.Dict(String, String)) -> Option(String) {
+  dict.to_list(m)
+  |> list.find_map(fn(entry) {
+    let #(name, kind) = entry
+    case kind {
+      "title" -> Ok(name)
+      _ -> Error(Nil)
+    }
+  })
+  |> option.from_result
+}
+
+fn build_one(kind: String, v: Yaml) -> Emit {
+  case kind {
+    "title" -> emit_rich_wrapper("title", v)
+    "rich_text" -> emit_rich_wrapper("rich_text", v)
+    "number" -> emit_number(v)
+    "checkbox" -> emit_checkbox(v)
+    "select" -> emit_named_option("select", v)
+    "status" -> emit_named_option("status", v)
+    "multi_select" -> emit_multi_select(v)
+    "date" -> emit_date(v)
+    "url" -> emit_scalar_string("url", v)
+    "email" -> emit_scalar_string("email", v)
+    "phone_number" -> emit_scalar_string("phone_number", v)
+    "people" -> emit_id_list("people", v)
+    "relation" -> emit_id_list("relation", v)
+    "files" -> emit_files(v)
+    "unique_id"
+    | "formula"
+    | "rollup"
+    | "created_time"
+    | "last_edited_time"
+    | "created_by"
+    | "last_edited_by" -> Skip("read-only " <> kind)
+    other -> Skip("unsupported type " <> other)
+  }
+}
+
+fn emit_rich_wrapper(key: String, v: Yaml) -> Emit {
+  case v {
+    yaml.YNull -> Emit(json.object([#(key, json.array([], fn(x) { x }))]))
+    yaml.YString(s) ->
+      Emit(json.object([#(key, json.array([s], text_run_json))]))
+    _ -> Skip("expected string for " <> key)
+  }
+}
+
+fn text_run_json(s: String) -> Json {
+  json.object([
+    #("type", json.string("text")),
+    #("text", json.object([#("content", json.string(s))])),
+  ])
+}
+
+fn emit_number(v: Yaml) -> Emit {
+  case v {
+    yaml.YNull -> Emit(json.object([#("number", json.null())]))
+    yaml.YInt(n) -> Emit(json.object([#("number", json.int(n))]))
+    yaml.YFloat(f) -> Emit(json.object([#("number", json.float(f))]))
+    _ -> Skip("expected number")
+  }
+}
+
+fn emit_checkbox(v: Yaml) -> Emit {
+  case v {
+    yaml.YBool(b) -> Emit(json.object([#("checkbox", json.bool(b))]))
+    yaml.YNull -> Emit(json.object([#("checkbox", json.bool(False))]))
+    _ -> Skip("expected bool")
+  }
+}
+
+fn emit_named_option(key: String, v: Yaml) -> Emit {
+  case v {
+    yaml.YNull -> Emit(json.object([#(key, json.null())]))
+    yaml.YString(s) ->
+      Emit(
+        json.object([
+          #(key, json.object([#("name", json.string(s))])),
+        ]),
+      )
+    _ -> Skip("expected string for " <> key)
+  }
+}
+
+fn emit_multi_select(v: Yaml) -> Emit {
+  case v {
+    yaml.YNull ->
+      Emit(json.object([#("multi_select", json.array([], fn(x) { x }))]))
+    yaml.YList(items) -> {
+      case list.try_map(items, extract_string) {
+        Ok(names) ->
+          Emit(
+            json.object([
+              #(
+                "multi_select",
+                json.array(names, fn(n) {
+                  json.object([#("name", json.string(n))])
+                }),
+              ),
+            ]),
+          )
+        Error(_) -> Skip("multi_select items must be strings")
+      }
+    }
+    _ -> Skip("expected list for multi_select")
+  }
+}
+
+fn emit_date(v: Yaml) -> Emit {
+  case v {
+    yaml.YNull -> Emit(json.object([#("date", json.null())]))
+    yaml.YString(s) ->
+      Emit(
+        json.object([
+          #(
+            "date",
+            json.object([
+              #("start", json.string(s)),
+              #("end", json.null()),
+              #("time_zone", json.null()),
+            ]),
+          ),
+        ]),
+      )
+    yaml.YMap(_) -> {
+      let start = opt_string_field(v, "start")
+      let end_ = opt_string_field(v, "end")
+      let tz = opt_string_field(v, "time_zone")
+      case start {
+        None -> Skip("date map missing start")
+        Some(s) ->
+          Emit(
+            json.object([
+              #(
+                "date",
+                json.object([
+                  #("start", json.string(s)),
+                  #("end", opt_string_json(end_)),
+                  #("time_zone", opt_string_json(tz)),
+                ]),
+              ),
+            ]),
+          )
+      }
+    }
+    _ -> Skip("expected string or map for date")
+  }
+}
+
+fn opt_string_field(v: Yaml, key: String) -> Option(String) {
+  case yaml.get(v, key) {
+    Some(yaml.YString(s)) -> Some(s)
+    _ -> None
+  }
+}
+
+fn opt_string_json(o: Option(String)) -> Json {
+  case o {
+    Some(s) -> json.string(s)
+    None -> json.null()
+  }
+}
+
+fn emit_scalar_string(key: String, v: Yaml) -> Emit {
+  case v {
+    yaml.YNull -> Emit(json.object([#(key, json.null())]))
+    yaml.YString(s) -> Emit(json.object([#(key, json.string(s))]))
+    _ -> Skip("expected string for " <> key)
+  }
+}
+
+fn emit_id_list(key: String, v: Yaml) -> Emit {
+  case v {
+    yaml.YNull -> Emit(json.object([#(key, json.array([], fn(x) { x }))]))
+    yaml.YList(items) ->
+      case list.try_map(items, extract_string) {
+        Ok(ids) ->
+          Emit(
+            json.object([
+              #(
+                key,
+                json.array(ids, fn(id) {
+                  json.object([#("id", json.string(id))])
+                }),
+              ),
+            ]),
+          )
+        Error(_) -> Skip(key <> " items must be strings")
+      }
+    _ -> Skip("expected list for " <> key)
+  }
+}
+
+fn emit_files(v: Yaml) -> Emit {
+  case v {
+    yaml.YNull -> Emit(json.object([#("files", json.array([], fn(x) { x }))]))
+    yaml.YList(items) ->
+      case list.try_map(items, extract_string) {
+        Ok(urls) ->
+          Emit(
+            json.object([
+              #(
+                "files",
+                json.array(urls, fn(u) {
+                  json.object([
+                    #("name", json.string(u)),
+                    #("type", json.string("external")),
+                    #("external", json.object([#("url", json.string(u))])),
+                  ])
+                }),
+              ),
+            ]),
+          )
+        Error(_) -> Skip("files items must be strings")
+      }
+    _ -> Skip("expected list for files")
+  }
+}
+
+fn extract_string(v: Yaml) -> Result(String, Nil) {
+  case v {
+    yaml.YString(s) -> Ok(s)
+    _ -> Error(Nil)
+  }
 }
