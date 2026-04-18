@@ -934,3 +934,145 @@ fn embed_json(url: String) -> Json {
     ]),
   )
 }
+
+// ─── Write segmentation (child_page create/append) ─────────────────────
+
+pub type WriteSegment {
+  PlainMarkdown(md: String)
+  CreateSubpage(title: String, body: String)
+  AppendSubpage(id: String, body: String)
+}
+
+/// Split markdown at `<!-- child_page:ID ... -->` … `<!-- /child_page:ID -->`
+/// boundaries. Nested markers are preserved verbatim in the inner body so
+/// the caller can recurse. Empty or `new` IDs become `CreateSubpage`;
+/// other IDs become `AppendSubpage`.
+pub fn segment_markdown(md: String) -> List(WriteSegment) {
+  let lines = string.split(md, "\n")
+  walk_segments(lines, [], [])
+}
+
+fn walk_segments(
+  lines: List(String),
+  plain_rev: List(String),
+  acc: List(WriteSegment),
+) -> List(WriteSegment) {
+  case lines {
+    [] -> list.reverse(flush_plain(plain_rev, acc))
+    [line, ..rest] ->
+      case parse_child_open(line) {
+        Some(id) -> {
+          let acc2 = flush_plain(plain_rev, acc)
+          let #(inner_rev, tail) = consume_child(rest, 1, [])
+          let inner = list.reverse(inner_rev)
+          let seg = case is_new_id(id) {
+            True -> {
+              let #(title, body_lines) = extract_title(inner)
+              CreateSubpage(title, string.join(body_lines, "\n"))
+            }
+            False -> AppendSubpage(id, string.join(inner, "\n"))
+          }
+          walk_segments(tail, [], [seg, ..acc2])
+        }
+        None -> walk_segments(rest, [line, ..plain_rev], acc)
+      }
+  }
+}
+
+fn flush_plain(
+  plain_rev: List(String),
+  acc: List(WriteSegment),
+) -> List(WriteSegment) {
+  case plain_rev {
+    [] -> acc
+    _ -> {
+      let md = string.join(list.reverse(plain_rev), "\n")
+      case string.trim(md) {
+        "" -> acc
+        _ -> [PlainMarkdown(md), ..acc]
+      }
+    }
+  }
+}
+
+fn consume_child(
+  lines: List(String),
+  depth: Int,
+  inner_rev: List(String),
+) -> #(List(String), List(String)) {
+  case lines {
+    [] -> #(inner_rev, [])
+    [line, ..rest] ->
+      case parse_child_close(line), parse_child_open(line) {
+        True, _ ->
+          case depth - 1 {
+            0 -> #(inner_rev, rest)
+            d -> consume_child(rest, d, [line, ..inner_rev])
+          }
+        False, Some(_) -> consume_child(rest, depth + 1, [line, ..inner_rev])
+        False, None -> consume_child(rest, depth, [line, ..inner_rev])
+      }
+  }
+}
+
+fn parse_child_open(line: String) -> Option(String) {
+  let t = string.trim(line)
+  case string.starts_with(t, "<!-- child_page:"), string.ends_with(t, "-->") {
+    True, True -> {
+      let after = string.drop_start(t, string.length("<!-- child_page:"))
+      let body = string.drop_end(after, 3)
+      let id = extract_id_token(string.trim(body))
+      Some(id)
+    }
+    _, _ -> None
+  }
+}
+
+fn parse_child_close(line: String) -> Bool {
+  let t = string.trim(line)
+  string.starts_with(t, "<!-- /child_page:") && string.ends_with(t, "-->")
+}
+
+fn extract_id_token(body: String) -> String {
+  case string.split_once(body, " ") {
+    Ok(#(id, _)) -> id
+    Error(_) -> body
+  }
+}
+
+fn is_new_id(id: String) -> Bool {
+  case string.trim(id) {
+    "" -> True
+    "new" -> True
+    _ -> False
+  }
+}
+
+fn extract_title(inner: List(String)) -> #(String, List(String)) {
+  case skip_blanks(inner, 0) {
+    #(leading, [heading, ..rest]) ->
+      case heading {
+        "## " <> title -> #(title, list.append(repeat_blank(leading), rest))
+        _ -> #("", inner)
+      }
+    _ -> #("", inner)
+  }
+}
+
+fn skip_blanks(lines: List(String), n: Int) -> #(Int, List(String)) {
+  case lines {
+    [line, ..rest] ->
+      case string.trim(line) {
+        "" -> skip_blanks(rest, n + 1)
+        _ -> #(n, lines)
+      }
+    [] -> #(n, [])
+  }
+}
+
+fn repeat_blank(n: Int) -> List(String) {
+  case n > 0 {
+    True -> ["", ..repeat_blank(n - 1)]
+    False -> []
+  }
+}

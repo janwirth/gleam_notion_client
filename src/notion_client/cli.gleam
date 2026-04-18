@@ -250,18 +250,89 @@ fn cmd_append_file(page_id: String, path: String) -> Nil {
   }
 }
 
-fn do_append(
+fn do_append(client: Client, page_id: String, md: String) -> Result(Nil, String) {
+  apply_segments(client, page_id, markdown.segment_markdown(md))
+}
+
+fn apply_segments(
   client: Client,
-  page_id: String,
+  parent_id: String,
+  segments: List(markdown.WriteSegment),
+) -> Result(Nil, String) {
+  case segments {
+    [] -> Ok(Nil)
+    [seg, ..rest] -> {
+      use _ <- result.try(apply_segment(client, parent_id, seg))
+      apply_segments(client, parent_id, rest)
+    }
+  }
+}
+
+fn apply_segment(
+  client: Client,
+  parent_id: String,
+  seg: markdown.WriteSegment,
+) -> Result(Nil, String) {
+  case seg {
+    markdown.PlainMarkdown(md) -> append_plain(client, parent_id, md)
+    markdown.AppendSubpage(id, body) ->
+      apply_segments(client, id, markdown.segment_markdown(body))
+    markdown.CreateSubpage(title, body) -> {
+      use new_id <- result.try(create_subpage(client, parent_id, title))
+      apply_segments(client, new_id, markdown.segment_markdown(body))
+    }
+  }
+}
+
+fn append_plain(
+  client: Client,
+  parent_id: String,
   md: String,
-) -> Result(Dynamic, String) {
+) -> Result(Nil, String) {
   let body = markdown.from_markdown(md)
   let req =
     notion_client.base_request(client)
     |> request.set_method(http.Patch)
-    |> request.set_path("/v1/blocks/" <> page_id <> "/children")
+    |> request.set_path("/v1/blocks/" <> parent_id <> "/children")
     |> request.set_body(<<json.to_string(body):utf8>>)
-  send(client, req)
+  use _ <- result.try(send(client, req))
+  Ok(Nil)
+}
+
+fn create_subpage(
+  client: Client,
+  parent_id: String,
+  title: String,
+) -> Result(String, String) {
+  let body =
+    json.object([
+      #("parent", json.object([#("page_id", json.string(parent_id))])),
+      #("properties", json.object([#("title", title_property_json(title))])),
+    ])
+  let req =
+    notion_client.base_request(client)
+    |> request.set_method(http.Post)
+    |> request.set_path("/v1/pages")
+    |> request.set_body(<<json.to_string(body):utf8>>)
+  use resp <- result.try(send(client, req))
+  case decode.run(resp, id_decoder()) {
+    Ok(id) -> Ok(id)
+    Error(_) -> Error("create subpage: missing id")
+  }
+}
+
+fn title_property_json(title: String) -> json.Json {
+  json.array([title], fn(t) {
+    json.object([
+      #("type", json.string("text")),
+      #("text", json.object([#("content", json.string(t))])),
+    ])
+  })
+}
+
+fn id_decoder() -> decode.Decoder(String) {
+  use id <- decode.field("id", decode.string)
+  decode.success(id)
 }
 
 // ─── transport ─────────────────────────────────────────────────────────
