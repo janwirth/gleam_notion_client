@@ -14,16 +14,19 @@
 //// javascript), so `scripts/regenerate.sh` truncates everything below
 //// the marker after each run.
 
+import gleam/erlang/process
 import gleam/http
 import gleam/http/request.{type Request}
 import gleam/http/response.{type Response}
 import gleam/httpc
+import gleam/int
 import gleam/option
 import gleam/uri
 import notion_client/error.{
   type NotionError, ClientError, RequestTimeout, ResponseBodyError,
   UnknownHttpResponseError,
 }
+import notion_client/retry.{type RetryConfig, Backoff}
 
 pub const default_base_url: String = "https://api.notion.com"
 
@@ -37,11 +40,6 @@ pub type LogLevel {
   Debug
 }
 
-pub type Retry {
-  NoRetry
-  ExponentialBackoff(max_attempts: Int, base_delay_ms: Int)
-}
-
 pub type Logger =
   fn(String) -> Nil
 
@@ -53,9 +51,15 @@ pub type Client {
     notion_version: String,
     log_level: LogLevel,
     logger: Logger,
-    retry: Retry,
+    retry: RetryConfig,
   )
 }
+
+pub const default_retry: RetryConfig = Backoff(
+  max_attempts: 3,
+  base_delay_ms: 250,
+  max_delay_ms: 5000,
+)
 
 /// Construct a `Client` with sensible defaults. `auth` is the Notion
 /// integration token (sent as `Authorization: Bearer <auth>`).
@@ -67,7 +71,7 @@ pub fn new(auth: String) -> Client {
     notion_version: default_notion_version,
     log_level: Silent,
     logger: fn(_msg) { Nil },
-    retry: NoRetry,
+    retry: default_retry,
   )
 }
 
@@ -110,15 +114,24 @@ pub fn send(
   |> httpc.dispatch_bits(req)
 }
 
-/// Typed transport: same wire call as [`send`](#send), but classifies
-/// every failure (transport or non-2xx response) into a
+/// Typed transport: same wire call as [`send`](#send) but applies the
+/// client's retry policy and classifies every failure (transport or
+/// non-2xx response) into a
 /// [`NotionError`](notion_client/error.html#NotionError) so callers
 /// never need to handle `httpc.HttpError` or raw status codes.
 pub fn request(
   client: Client,
   req: Request(BitArray),
 ) -> Result(Response(BitArray), NotionError) {
-  case send(client, req) {
+  let sender = fn(r) { send(client, r) }
+  retry.run(client.retry, sender, process.sleep, int.random, req)
+  |> classify
+}
+
+fn classify(
+  res: Result(Response(BitArray), httpc.HttpError),
+) -> Result(Response(BitArray), NotionError) {
+  case res {
     Error(httpc.ResponseTimeout) -> Error(ClientError(RequestTimeout))
     Error(httpc.InvalidUtf8Response) ->
       Error(ClientError(ResponseBodyError("invalid utf8 in response body")))
