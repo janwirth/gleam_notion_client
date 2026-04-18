@@ -33,6 +33,8 @@ pub type Block {
   Quote(text: String)
   Divider
   Image(url: String, caption: String, external: Bool)
+  Embed(url: String, caption: String)
+  Bookmark(url: String)
   Unsupported(kind: String)
 }
 
@@ -54,6 +56,9 @@ pub fn block_decoder() -> Decoder(Block) {
     "quote" -> decode_text_block("quote", fn(t) { Quote(t) })
     "divider" -> decode.success(Divider)
     "image" -> decode_image()
+    "embed" -> decode_embed()
+    "bookmark" -> decode_bookmark("bookmark")
+    "link_preview" -> decode_bookmark("link_preview")
     other -> decode.success(Unsupported(other))
   }
 }
@@ -92,6 +97,20 @@ fn decode_image() -> Decoder(Block) {
   )
   let #(url, external) = url_src
   decode.success(Image(url, caption, external))
+}
+
+fn decode_embed() -> Decoder(Block) {
+  use url <- decode.subfield(["embed", "url"], decode.string)
+  use caption <- decode.subfield(
+    ["embed", "caption"],
+    rich_text_markdown_decoder(),
+  )
+  decode.success(Embed(url, caption))
+}
+
+fn decode_bookmark(key: String) -> Decoder(Block) {
+  use url <- decode.subfield([key, "url"], decode.string)
+  decode.success(Bookmark(url))
 }
 
 fn decode_code() -> Decoder(Block) {
@@ -203,6 +222,8 @@ fn render_block(b: Block, indent: Int, n: Int) -> #(String, Int) {
       pad <> render_image(url, caption, external),
       1,
     )
+    Embed(url, caption) -> #(pad <> render_embed(url, caption, pad), 1)
+    Bookmark(url) -> #(pad <> "[" <> url <> "](" <> url <> ")", 1)
     Unsupported(kind) -> #(pad <> "<!-- unsupported: " <> kind <> " -->", 1)
   }
 }
@@ -218,6 +239,14 @@ fn render_image(url: String, caption: String, external: Bool) -> String {
       )
   }
   "![" <> caption <> "](" <> url <> ")"
+}
+
+fn render_embed(url: String, caption: String, pad: String) -> String {
+  let iframe = "<iframe src=\"" <> url <> "\"></iframe>"
+  case caption {
+    "" -> iframe
+    _ -> iframe <> "\n" <> pad <> "*" <> caption <> "*"
+  }
 }
 
 fn render_children(children: List(Block), indent: Int) -> String {
@@ -320,6 +349,11 @@ fn non_list_block(content: String) -> Json {
         Ok(#(caption, url)) -> image_json(url, caption)
         Error(_) -> paragraph_json(content)
       }
+    "<iframe" <> _ ->
+      case parse_iframe_line(content) {
+        Ok(url) -> embed_json(url)
+        Error(_) -> paragraph_json(content)
+      }
     _ -> paragraph_json(content)
   }
 }
@@ -332,6 +366,31 @@ fn parse_image_line(content: String) -> Result(#(String, String), Nil) {
         Error(_) -> Error(Nil)
       }
     _ -> Error(Nil)
+  }
+}
+
+fn parse_iframe_line(content: String) -> Result(String, Nil) {
+  let trimmed = string.trim(content)
+  let closed =
+    string.ends_with(trimmed, "</iframe>") || string.ends_with(trimmed, "/>")
+  case closed {
+    False -> Error(Nil)
+    True -> extract_src(trimmed)
+  }
+}
+
+fn extract_src(line: String) -> Result(String, Nil) {
+  case string.split_once(line, "src=\"") {
+    Ok(#(_, after)) ->
+      case string.split_once(after, "\"") {
+        Ok(#(url, _)) ->
+          case url {
+            "" -> Error(Nil)
+            _ -> Ok(url)
+          }
+        Error(_) -> Error(Nil)
+      }
+    Error(_) -> Error(Nil)
   }
 }
 
@@ -544,6 +603,16 @@ fn image_json(url: String, caption: String) -> Json {
       #("type", json.string("external")),
       #("external", json.object([#("url", json.string(url))])),
       #("caption", rich_text_json(caption)),
+    ]),
+  )
+}
+
+fn embed_json(url: String) -> Json {
+  block_json(
+    "embed",
+    json.object([
+      #("url", json.string(url)),
+      #("caption", json.array([], fn(x) { x })),
     ]),
   )
 }
