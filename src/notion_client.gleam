@@ -20,6 +20,10 @@ import gleam/http/response.{type Response}
 import gleam/httpc
 import gleam/option
 import gleam/uri
+import notion_client/error.{
+  type NotionError, ClientError, RequestTimeout, ResponseBodyError,
+  UnknownHttpResponseError,
+}
 
 pub const default_base_url: String = "https://api.notion.com"
 
@@ -104,5 +108,27 @@ pub fn send(
   httpc.configure()
   |> httpc.timeout(client.timeout_ms)
   |> httpc.dispatch_bits(req)
+}
+
+/// Typed transport: same wire call as [`send`](#send), but classifies
+/// every failure (transport or non-2xx response) into a
+/// [`NotionError`](notion_client/error.html#NotionError) so callers
+/// never need to handle `httpc.HttpError` or raw status codes.
+pub fn request(
+  client: Client,
+  req: Request(BitArray),
+) -> Result(Response(BitArray), NotionError) {
+  case send(client, req) {
+    Error(httpc.ResponseTimeout) -> Error(ClientError(RequestTimeout))
+    Error(httpc.InvalidUtf8Response) ->
+      Error(ClientError(ResponseBodyError("invalid utf8 in response body")))
+    Error(httpc.FailedToConnect(_, _)) ->
+      Error(ClientError(UnknownHttpResponseError("failed to connect")))
+    Ok(resp) ->
+      case resp.status {
+        s if s >= 200 && s < 300 -> Ok(resp)
+        s -> Error(error.parse_api_error(resp.body, s))
+      }
+  }
 }
 // GENERATED -------------
