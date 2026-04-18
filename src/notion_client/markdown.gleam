@@ -14,6 +14,7 @@ import gleam/int
 import gleam/json.{type Json}
 import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/order
 import gleam/string
 import notion_client/rich_text
 
@@ -191,11 +192,23 @@ fn render_children(children: List(Block), indent: Int) -> String {
 
 pub fn from_markdown(source: String) -> Json {
   let lines = string.split(source, "\n")
-  let blocks = parse_lines(lines, [])
+  let blocks = walk_lines(lines, [])
   json.object([#("children", json.array(blocks, fn(b) { b }))])
 }
 
-fn parse_lines(lines: List(String), acc: List(Json)) -> List(Json) {
+type ListItemKind {
+  KBullet
+  KNumbered
+  KTodo(checked: Bool)
+}
+
+type LineClass {
+  ClSkip
+  ClListItem(level: Int, kind: ListItemKind, text: String)
+  ClNonList(level: Int, json: Json)
+}
+
+fn walk_lines(lines: List(String), acc: List(Json)) -> List(Json) {
   case lines {
     [] -> list.reverse(acc)
     ["```" <> rest_first, ..rest] -> {
@@ -204,47 +217,70 @@ fn parse_lines(lines: List(String), acc: List(Json)) -> List(Json) {
         "" -> "plain text"
         l -> l
       }
-      parse_lines(tail, [code_block_json(code, lang), ..acc])
+      walk_lines(tail, [code_block_json(code, lang), ..acc])
     }
     [line, ..rest] ->
       case classify_line(line) {
-        Skip -> parse_lines(rest, acc)
-        Block(j) -> parse_lines(rest, [j, ..acc])
+        ClSkip -> walk_lines(rest, acc)
+        ClListItem(_, _, _) -> {
+          let #(items, tail) = consume_list(lines, 0)
+          walk_lines(tail, list.append(list.reverse(items), acc))
+        }
+        ClNonList(_, j) -> walk_lines(rest, [j, ..acc])
       }
   }
 }
 
-type LineKind {
-  Block(Json)
-  Skip
+fn classify_line(line: String) -> LineClass {
+  let indent_chars = count_indent(line)
+  let content = string.trim(line)
+  case content {
+    "" -> ClSkip
+    _ -> {
+      let level = int.min(indent_chars / 2, 10)
+      case list_kind(content) {
+        Ok(#(kind, text)) -> ClListItem(level, kind, text)
+        Error(_) -> ClNonList(level, non_list_block(content))
+      }
+    }
+  }
 }
 
-fn classify_line(line: String) -> LineKind {
-  let trimmed = string.trim(line)
-  case trimmed {
-    "" -> Skip
-    "---" -> Block(divider_json())
+fn count_indent(line: String) -> Int {
+  case line {
+    " " <> rest -> 1 + count_indent(rest)
+    "\t" <> rest -> 4 + count_indent(rest)
+    _ -> 0
+  }
+}
+
+fn list_kind(content: String) -> Result(#(ListItemKind, String), Nil) {
+  case content {
+    "- [ ] " <> t -> Ok(#(KTodo(False), t))
+    "- [x] " <> t -> Ok(#(KTodo(True), t))
+    "- [X] " <> t -> Ok(#(KTodo(True), t))
+    "- " <> t -> Ok(#(KBullet, t))
+    "* " <> t -> Ok(#(KBullet, t))
     _ ->
-      case trimmed {
-        "# " <> t -> Block(heading_json(1, t))
-        "## " <> t -> Block(heading_json(2, t))
-        "### " <> t -> Block(heading_json(3, t))
-        "> " <> t -> Block(quote_json(t))
-        "- [ ] " <> t -> Block(todo_json(t, False))
-        "- [x] " <> t | "- [X] " <> t -> Block(todo_json(t, True))
-        "- " <> t -> Block(bullet_json(t))
-        "* " <> t -> Block(bullet_json(t))
-        _ ->
-          case parse_numbered(trimmed) {
-            Some(text) -> Block(numbered_json(text))
-            None -> Block(paragraph_json(trimmed))
-          }
+      case parse_numbered(content) {
+        Some(t) -> Ok(#(KNumbered, t))
+        None -> Error(Nil)
       }
+  }
+}
+
+fn non_list_block(content: String) -> Json {
+  case content {
+    "---" -> divider_json()
+    "# " <> t -> heading_json(1, t)
+    "## " <> t -> heading_json(2, t)
+    "### " <> t -> heading_json(3, t)
+    "> " <> t -> quote_json(t)
+    _ -> paragraph_json(content)
   }
 }
 
 fn parse_numbered(line: String) -> Option(String) {
-  // Match "1. foo", "42. foo"; split on first ". "
   case string.split_once(line, ". ") {
     Ok(#(prefix, rest)) ->
       case int.parse(prefix) {
@@ -253,6 +289,109 @@ fn parse_numbered(line: String) -> Option(String) {
       }
     Error(_) -> None
   }
+}
+
+type PendingItem {
+  PendingItem(kind: ListItemKind, text: String, children: List(Json))
+}
+
+fn consume_list(lines: List(String), level: Int) -> #(List(Json), List(String)) {
+  consume_list_loop(lines, level, [], None)
+}
+
+fn consume_list_loop(
+  lines: List(String),
+  level: Int,
+  acc: List(Json),
+  pending: Option(PendingItem),
+) -> #(List(Json), List(String)) {
+  case lines {
+    [] -> #(list.reverse(finalize(acc, pending)), [])
+    [line, ..rest] ->
+      case classify_line(line) {
+        ClSkip -> consume_list_loop(rest, level, acc, pending)
+        ClListItem(item_level, kind, text) ->
+          case int.compare(item_level, level) {
+            order.Eq ->
+              consume_list_loop(
+                rest,
+                level,
+                finalize(acc, pending),
+                Some(PendingItem(kind, text, [])),
+              )
+            order.Gt -> {
+              let #(children, tail) = consume_list(lines, item_level)
+              case pending {
+                Some(p) ->
+                  consume_list_loop(
+                    tail,
+                    level,
+                    acc,
+                    Some(PendingItem(
+                      p.kind,
+                      p.text,
+                      list.append(p.children, children),
+                    )),
+                  )
+                None ->
+                  consume_list_loop(
+                    tail,
+                    level,
+                    list.append(list.reverse(children), acc),
+                    None,
+                  )
+              }
+            }
+            order.Lt -> #(list.reverse(finalize(acc, pending)), lines)
+          }
+        ClNonList(other_level, j) ->
+          case other_level > level, pending {
+            True, Some(p) ->
+              consume_list_loop(
+                rest,
+                level,
+                acc,
+                Some(PendingItem(p.kind, p.text, list.append(p.children, [j]))),
+              )
+            _, _ -> #(list.reverse(finalize(acc, pending)), lines)
+          }
+      }
+  }
+}
+
+fn finalize(acc: List(Json), pending: Option(PendingItem)) -> List(Json) {
+  case pending {
+    None -> acc
+    Some(p) -> [list_item_json(p), ..acc]
+  }
+}
+
+fn list_item_json(p: PendingItem) -> Json {
+  case p.kind {
+    KBullet -> nested_block_json("bulleted_list_item", p.text, p.children, None)
+    KNumbered ->
+      nested_block_json("numbered_list_item", p.text, p.children, None)
+    KTodo(checked) ->
+      nested_block_json("to_do", p.text, p.children, Some(checked))
+  }
+}
+
+fn nested_block_json(
+  kind: String,
+  text: String,
+  children: List(Json),
+  checked: Option(Bool),
+) -> Json {
+  let base = [#("rich_text", rich_text_json(text))]
+  let base = case checked {
+    Some(b) -> list.append(base, [#("checked", json.bool(b))])
+    None -> base
+  }
+  let fields = case children {
+    [] -> base
+    _ -> list.append(base, [#("children", json.array(children, fn(j) { j }))])
+  }
+  block_json(kind, json.object(fields))
 }
 
 fn take_code_block(
@@ -297,30 +436,6 @@ fn paragraph_json(text: String) -> Json {
 fn heading_json(level: Int, text: String) -> Json {
   let kind = "heading_" <> int.to_string(level)
   block_json(kind, json.object([#("rich_text", rich_text_json(text))]))
-}
-
-fn bullet_json(text: String) -> Json {
-  block_json(
-    "bulleted_list_item",
-    json.object([#("rich_text", rich_text_json(text))]),
-  )
-}
-
-fn numbered_json(text: String) -> Json {
-  block_json(
-    "numbered_list_item",
-    json.object([#("rich_text", rich_text_json(text))]),
-  )
-}
-
-fn todo_json(text: String, checked: Bool) -> Json {
-  block_json(
-    "to_do",
-    json.object([
-      #("rich_text", rich_text_json(text)),
-      #("checked", json.bool(checked)),
-    ]),
-  )
 }
 
 fn code_block_json(text: String, language: String) -> Json {
