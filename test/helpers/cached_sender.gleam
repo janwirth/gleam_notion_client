@@ -116,6 +116,13 @@ pub fn clear(req: Request(BitArray), root: String) -> Nil {
   Nil
 }
 
+/// Load a cached response by its on-disk path. Used by the decoder
+/// test suite to feed cached bodies into generated `*_response`
+/// decoders.
+pub fn load(path: String) -> Result(Response(BitArray), Nil) {
+  read_cache(path)
+}
+
 fn live_and_write(
   live: Sender,
   req: Request(BitArray),
