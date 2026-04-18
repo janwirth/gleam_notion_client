@@ -30,7 +30,7 @@ oaspec --version
 Loaded automatically from `.env` by `.ralph/claude-yolo` wrapper.
 
 - `NOTION_TOKEN` — integration token (source: `/home/dev/don/config.json`). Required for record/refresh.
-- `NOTION_BOOTSTRAP_PAGE_ID` = `3465cbd3c0c680d7bcc2f8dd15b3a05d`. Root page for cache seeding — every cached response must be reachable by recursing from this page.
+- `NOTION_BOOTSTRAP_DATABASE_ID` = `3465cbd3c0c6808085c5ca3816c811e1`. Test database "notion_client reference pages". All v2 test pages, property examples, and block variants must live as rows in this database. Tests should create rows via `pages.create` with `parent: { database_id: <id> }`, not under a static page.
 - `NOTION_CACHE_MODE` — `replay` (default) | `record` | `refresh`.
 
 ## Notes
