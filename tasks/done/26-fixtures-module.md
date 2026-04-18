@@ -10,19 +10,19 @@ New `test/helpers/fixtures.gleam` with shared primitives every live test uses:
 for now — real bootstrap lives in task 27).
 
 ## Steps
-- [ ] Create `test/helpers/fixtures.gleam`.
-- [ ] `create_row(client, db_id, title, extra_properties)` — POST /v1/pages,
+- [x] Create `test/helpers/fixtures.gleam`.
+- [x] `create_row(client, db_id, title, extra_properties)` — POST /v1/pages,
       parent `database_id`, properties merges `Name` (title run) with
       `extra_properties` dict. Returns new page id.
-- [ ] `archive_by_title(client, db_id, title)` — POST /v1/databases/<id>/query
+- [x] `archive_by_title(client, db_id, title)` — POST /v1/databases/<id>/query
       with Name equals filter, loop pagination, PATCH each hit with
       `{"archived": true}`.
-- [ ] `archive_all_rows(client, db_id)` — same as above with no filter.
-- [ ] `ensure_schema` — stub returning Nil (task 27 fills in body).
-- [ ] Unit-level sanity: helper compiles and is referenced from at least one
+- [x] `archive_all_rows(client, db_id)` — same as above with no filter.
+- [x] `ensure_schema` — stub returning Nil (task 27 fills in body).
+- [x] Unit-level sanity: helper compiles and is referenced from at least one
       live test (rich_text) which replaces its inline `create_row` +
       pre-run `archive_by_title`.
-- [ ] `gleam test` green in replay mode.
+- [x] `gleam test` green in replay mode.
 
 ## Done when
 - `test/helpers/fixtures.gleam` exists and is used by at least
