@@ -45,6 +45,12 @@ pub type Block {
     status: ChildPageStatus,
   )
   ChildDatabase(id: String, title: String)
+  SyncedBlock(
+    id: String,
+    source_id: Option(String),
+    children: List(Block),
+    status: SyncedStatus,
+  )
   Unsupported(kind: String)
 }
 
@@ -52,6 +58,13 @@ pub type ChildPageStatus {
   Inlined
   DepthLimitReached
   CycleDetected
+}
+
+pub type SyncedStatus {
+  SyncedOriginal
+  SyncedReference
+  SyncedInlined
+  SyncedCycle
 }
 
 // ─── Notion JSON → Block ────────────────────────────────────────────────
@@ -79,6 +92,7 @@ pub fn block_decoder() -> Decoder(Block) {
     "table_row" -> decode_table_row()
     "child_page" -> decode_child_page()
     "child_database" -> decode_child_database()
+    "synced_block" -> decode_synced_block()
     other -> decode.success(Unsupported(other))
   }
 }
@@ -177,6 +191,24 @@ fn decode_child_database() -> Decoder(Block) {
   decode.success(ChildDatabase(option.unwrap(id, ""), option.unwrap(title, "")))
 }
 
+fn decode_synced_block() -> Decoder(Block) {
+  use id <- decode.field("id", decode.optional(decode.string))
+  use src <- decode.subfield(
+    ["synced_block", "synced_from"],
+    decode.optional(synced_from_decoder()),
+  )
+  let status = case src {
+    None -> SyncedOriginal
+    Some(_) -> SyncedReference
+  }
+  decode.success(SyncedBlock(option.unwrap(id, ""), src, [], status))
+}
+
+fn synced_from_decoder() -> Decoder(String) {
+  use block_id <- decode.field("block_id", decode.string)
+  decode.success(block_id)
+}
+
 fn decode_code() -> Decoder(Block) {
   use text <- decode.subfield(
     ["code", "rich_text"],
@@ -213,6 +245,7 @@ pub fn with_children(parent: Block, children: List(Block)) -> Block {
     Table(_, col, row) -> Table(extract_rows(children), col, row)
     ChildPage(id, title, depth, _, status) ->
       ChildPage(id, title, depth, children, status)
+    SyncedBlock(id, src, _, status) -> SyncedBlock(id, src, children, status)
     other -> other
   }
 }
@@ -306,6 +339,10 @@ fn render_block(b: Block, indent: Int, n: Int) -> #(String, Int) {
       1,
     )
     ChildDatabase(id, title) -> #(render_child_database(id, title, pad), 1)
+    SyncedBlock(id, src, kids, status) -> #(
+      render_synced_block(id, src, kids, status, pad, indent),
+      1,
+    )
     Unsupported(kind) -> #(pad <> "<!-- unsupported: " <> kind <> " -->", 1)
   }
 }
@@ -426,6 +463,41 @@ fn render_child_page(
 
 fn render_child_database(id: String, title: String, pad: String) -> String {
   pad <> "<!-- child_database:" <> id <> " title=\"" <> title <> "\" -->"
+}
+
+fn render_synced_block(
+  id: String,
+  src: Option(String),
+  kids: List(Block),
+  status: SyncedStatus,
+  pad: String,
+  indent: Int,
+) -> String {
+  case status, src {
+    SyncedOriginal, _ -> {
+      let open = pad <> "<!-- synced_block:" <> id <> " -->"
+      let body = case kids {
+        [] -> ""
+        _ -> "\n" <> render_blocks(kids, indent, 1)
+      }
+      let close = pad <> "<!-- /synced_block:" <> id <> " -->"
+      open <> body <> "\n" <> close
+    }
+    SyncedReference, Some(src_id) ->
+      pad <> "<!-- synced_from:" <> src_id <> " -->"
+    SyncedInlined, Some(src_id) -> {
+      let open = pad <> "<!-- synced_from:" <> src_id <> " -->"
+      let body = case kids {
+        [] -> ""
+        _ -> "\n" <> render_blocks(kids, indent, 1)
+      }
+      let close = pad <> "<!-- /synced_from:" <> src_id <> " -->"
+      open <> body <> "\n" <> close
+    }
+    SyncedCycle, Some(src_id) ->
+      pad <> "<!-- synced_from:" <> src_id <> " (cycle) -->"
+    _, None -> pad <> "<!-- synced_block:" <> id <> " (malformed) -->"
+  }
 }
 
 fn render_children(children: List(Block), indent: Int) -> String {

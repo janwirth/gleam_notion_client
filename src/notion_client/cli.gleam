@@ -1,7 +1,7 @@
 //// CLI entry point.
 ////
 //// ```text
-//// notion_client read <page_id> [--write-file] [--max-depth N]
+//// notion_client read <page_id> [--write-file] [--max-depth N] [--inline-synced]
 //// notion_client append <page_id> <markdown>
 //// notion_client append <page_id> --from-file <path>
 //// ```
@@ -40,7 +40,7 @@ pub fn main() -> Nil {
 fn print_help() -> Nil {
   io.println(
     "Usage:
-  notion_client read <page_id> [--write-file] [--max-depth N]
+  notion_client read <page_id> [--write-file] [--max-depth N] [--inline-synced]
   notion_client append <page_id> <markdown>
   notion_client append <page_id> --from-file <path>
 
@@ -53,7 +53,8 @@ Env: NOTION_TOKEN required.",
 fn cmd_read(page_id: String, flags: List(String)) -> Nil {
   let write_file = list.contains(flags, "--write-file")
   let max_depth = parse_max_depth(flags, 3)
-  case with_client(fn(c) { do_read(c, page_id, max_depth) }) {
+  let inline_synced = list.contains(flags, "--inline-synced")
+  case with_client(fn(c) { do_read(c, page_id, max_depth, inline_synced) }) {
     Error(msg) -> die(msg)
     Ok(#(title, body)) ->
       case write_file {
@@ -85,6 +86,7 @@ fn do_read(
   client: Client,
   page_id: String,
   max_depth: Int,
+  inline_synced: Bool,
 ) -> Result(#(String, String), String) {
   use title <- result.try(fetch_title(client, page_id))
   use blocks <- result.try(fetch_block_tree(
@@ -92,6 +94,7 @@ fn do_read(
     page_id,
     0,
     max_depth,
+    inline_synced,
     set.new(),
   ))
   let md = "# " <> title <> "\n\n" <> markdown.to_markdown(blocks)
@@ -148,6 +151,7 @@ fn fetch_block_tree(
   block_id: String,
   depth: Int,
   max_depth: Int,
+  inline_synced: Bool,
   visited: Set(String),
 ) -> Result(List(Block), String) {
   use entries <- result.try(fetch_children_page(client, block_id))
@@ -155,7 +159,27 @@ fn fetch_block_tree(
     let #(b, id, has_children) = entry
     case b {
       markdown.ChildPage(cp_id, title, _, _, _) ->
-        resolve_child_page(client, cp_id, title, depth, max_depth, visited)
+        resolve_child_page(
+          client,
+          cp_id,
+          title,
+          depth,
+          max_depth,
+          inline_synced,
+          visited,
+        )
+      markdown.SyncedBlock(sb_id, src, _, _) ->
+        resolve_synced_block(
+          client,
+          sb_id,
+          src,
+          id,
+          has_children,
+          depth,
+          max_depth,
+          inline_synced,
+          visited,
+        )
       _ ->
         case has_children {
           False -> Ok(b)
@@ -165,6 +189,7 @@ fn fetch_block_tree(
               id,
               depth,
               max_depth,
+              inline_synced,
               visited,
             ))
             Ok(markdown.with_children(b, kids))
@@ -180,6 +205,7 @@ fn resolve_child_page(
   title: String,
   depth: Int,
   max_depth: Int,
+  inline_synced: Bool,
   visited: Set(String),
 ) -> Result(Block, String) {
   case set.contains(visited, cp_id) {
@@ -201,10 +227,79 @@ fn resolve_child_page(
             cp_id,
             depth + 1,
             max_depth,
+            inline_synced,
             set.insert(visited, cp_id),
           ))
           Ok(markdown.ChildPage(cp_id, title, depth + 1, kids, markdown.Inlined))
         }
+      }
+  }
+}
+
+fn resolve_synced_block(
+  client: Client,
+  sb_id: String,
+  src: option.Option(String),
+  entry_id: String,
+  has_children: Bool,
+  depth: Int,
+  max_depth: Int,
+  inline_synced: Bool,
+  visited: Set(String),
+) -> Result(Block, String) {
+  case src {
+    None -> {
+      case has_children {
+        False ->
+          Ok(markdown.SyncedBlock(sb_id, None, [], markdown.SyncedOriginal))
+        True -> {
+          use kids <- result.try(fetch_block_tree(
+            client,
+            entry_id,
+            depth,
+            max_depth,
+            inline_synced,
+            visited,
+          ))
+          Ok(markdown.SyncedBlock(sb_id, None, kids, markdown.SyncedOriginal))
+        }
+      }
+    }
+    Some(src_id) ->
+      case inline_synced {
+        False ->
+          Ok(markdown.SyncedBlock(
+            sb_id,
+            Some(src_id),
+            [],
+            markdown.SyncedReference,
+          ))
+        True ->
+          case set.contains(visited, src_id) {
+            True ->
+              Ok(markdown.SyncedBlock(
+                sb_id,
+                Some(src_id),
+                [],
+                markdown.SyncedCycle,
+              ))
+            False -> {
+              use kids <- result.try(fetch_block_tree(
+                client,
+                src_id,
+                depth,
+                max_depth,
+                inline_synced,
+                set.insert(visited, src_id),
+              ))
+              Ok(markdown.SyncedBlock(
+                sb_id,
+                Some(src_id),
+                kids,
+                markdown.SyncedInlined,
+              ))
+            }
+          }
       }
   }
 }
