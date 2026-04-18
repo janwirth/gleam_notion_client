@@ -11,6 +11,7 @@
 
 import gleam/dynamic/decode.{type Decoder}
 import gleam/int
+import gleam/io
 import gleam/json.{type Json}
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -31,6 +32,7 @@ pub type Block {
   Code(text: String, language: String)
   Quote(text: String)
   Divider
+  Image(url: String, caption: String, external: Bool)
   Unsupported(kind: String)
 }
 
@@ -51,6 +53,7 @@ pub fn block_decoder() -> Decoder(Block) {
     "code" -> decode_code()
     "quote" -> decode_text_block("quote", fn(t) { Quote(t) })
     "divider" -> decode.success(Divider)
+    "image" -> decode_image()
     other -> decode.success(Unsupported(other))
   }
 }
@@ -70,6 +73,25 @@ fn decode_todo() -> Decoder(Block) {
     decode.optional(decode.bool),
   )
   decode.success(ToDo(text, option.unwrap(checked, False)))
+}
+
+fn decode_image() -> Decoder(Block) {
+  let url_src_decoder =
+    decode.one_of(
+      decode.at(["external", "url"], decode.string)
+        |> decode.map(fn(u) { #(u, True) }),
+      [
+        decode.at(["file", "url"], decode.string)
+        |> decode.map(fn(u) { #(u, False) }),
+      ],
+    )
+  use url_src <- decode.field("image", url_src_decoder)
+  use caption <- decode.subfield(
+    ["image", "caption"],
+    rich_text_markdown_decoder(),
+  )
+  let #(url, external) = url_src
+  decode.success(Image(url, caption, external))
 }
 
 fn decode_code() -> Decoder(Block) {
@@ -177,8 +199,25 @@ fn render_block(b: Block, indent: Int, n: Int) -> #(String, Int) {
     )
     Quote(t) -> #(pad <> "> " <> t, 1)
     Divider -> #(pad <> "---", 1)
+    Image(url, caption, external) -> #(
+      pad <> render_image(url, caption, external),
+      1,
+    )
     Unsupported(kind) -> #(pad <> "<!-- unsupported: " <> kind <> " -->", 1)
   }
+}
+
+fn render_image(url: String, caption: String, external: Bool) -> String {
+  case external {
+    True -> Nil
+    False ->
+      io.println_error(
+        "[warn] notion_client/markdown: file-hosted image URL is signed"
+        <> " and expires (~1h). URL: "
+        <> url,
+      )
+  }
+  "![" <> caption <> "](" <> url <> ")"
 }
 
 fn render_children(children: List(Block), indent: Int) -> String {
@@ -276,7 +315,49 @@ fn non_list_block(content: String) -> Json {
     "## " <> t -> heading_json(2, t)
     "### " <> t -> heading_json(3, t)
     "> " <> t -> quote_json(t)
+    "![" <> _ ->
+      case parse_image_line(content) {
+        Ok(#(caption, url)) -> image_json(url, caption)
+        Error(_) -> paragraph_json(content)
+      }
     _ -> paragraph_json(content)
+  }
+}
+
+fn parse_image_line(content: String) -> Result(#(String, String), Nil) {
+  case content {
+    "![" <> rest ->
+      case split_caption_url(rest, "") {
+        Ok(#(caption, url)) -> Ok(#(caption, url))
+        Error(_) -> Error(Nil)
+      }
+    _ -> Error(Nil)
+  }
+}
+
+fn split_caption_url(
+  src: String,
+  caption_acc: String,
+) -> Result(#(String, String), Nil) {
+  case src {
+    "](" <> after -> {
+      case string.ends_with(after, ")") {
+        True -> {
+          let url = string.drop_end(after, 1)
+          case url {
+            "" -> Error(Nil)
+            _ -> Ok(#(caption_acc, url))
+          }
+        }
+        False -> Error(Nil)
+      }
+    }
+    "" -> Error(Nil)
+    _ ->
+      case string.pop_grapheme(src) {
+        Ok(#(ch, rest)) -> split_caption_url(rest, caption_acc <> ch)
+        Error(_) -> Error(Nil)
+      }
   }
 }
 
@@ -454,4 +535,15 @@ fn quote_json(text: String) -> Json {
 
 fn divider_json() -> Json {
   block_json("divider", json.object([]))
+}
+
+fn image_json(url: String, caption: String) -> Json {
+  block_json(
+    "image",
+    json.object([
+      #("type", json.string("external")),
+      #("external", json.object([#("url", json.string(url))])),
+      #("caption", rich_text_json(caption)),
+    ]),
+  )
 }
