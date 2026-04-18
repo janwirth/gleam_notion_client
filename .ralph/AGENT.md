@@ -27,7 +27,10 @@ oaspec --version
 
 ## Environment
 
-- `NOTION_TOKEN` — required for live API calls (record/refresh cache modes). Not needed for replay.
+Loaded automatically from `.env` by `.ralph/claude-yolo` wrapper.
+
+- `NOTION_TOKEN` — integration token (source: `/home/dev/don/config.json`). Required for record/refresh.
+- `NOTION_BOOTSTRAP_PAGE_ID` = `3465cbd3c0c680d7bcc2f8dd15b3a05d`. Root page for cache seeding — every cached response must be reachable by recursing from this page.
 - `NOTION_CACHE_MODE` — `replay` (default) | `record` | `refresh`.
 
 ## Notes

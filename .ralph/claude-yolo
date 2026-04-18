@@ -1,2 +1,5 @@
 #!/bin/bash
+# Source project .env so NOTION_TOKEN etc. are in Claude's env.
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+[[ -f "$PROJECT_ROOT/.env" ]] && set -a && source "$PROJECT_ROOT/.env" && set +a
 exec claude --dangerously-skip-permissions "$@"
