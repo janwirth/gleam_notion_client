@@ -6,3 +6,10 @@ erl_crash.dump
 .env.local
 /test/cache_tmp/
 
+# ralph runtime state
+.ralph/.*
+.ralph/live.log
+.ralph/logs/
+.ralph/progress.json
+.ralph/status.json
+
