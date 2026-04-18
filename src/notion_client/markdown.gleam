@@ -35,6 +35,8 @@ pub type Block {
   Image(url: String, caption: String, external: Bool)
   Embed(url: String, caption: String)
   Bookmark(url: String)
+  Table(rows: List(List(String)), has_column_header: Bool, has_row_header: Bool)
+  TableRow(cells: List(String))
   Unsupported(kind: String)
 }
 
@@ -59,6 +61,8 @@ pub fn block_decoder() -> Decoder(Block) {
     "embed" -> decode_embed()
     "bookmark" -> decode_bookmark("bookmark")
     "link_preview" -> decode_bookmark("link_preview")
+    "table" -> decode_table()
+    "table_row" -> decode_table_row()
     other -> decode.success(Unsupported(other))
   }
 }
@@ -113,6 +117,26 @@ fn decode_bookmark(key: String) -> Decoder(Block) {
   decode.success(Bookmark(url))
 }
 
+fn decode_table() -> Decoder(Block) {
+  use col <- decode.subfield(
+    ["table", "has_column_header"],
+    decode.optional(decode.bool),
+  )
+  use row <- decode.subfield(
+    ["table", "has_row_header"],
+    decode.optional(decode.bool),
+  )
+  decode.success(Table([], option.unwrap(col, True), option.unwrap(row, False)))
+}
+
+fn decode_table_row() -> Decoder(Block) {
+  use cells <- decode.subfield(
+    ["table_row", "cells"],
+    decode.list(rich_text_markdown_decoder()),
+  )
+  decode.success(TableRow(cells))
+}
+
 fn decode_code() -> Decoder(Block) {
   use text <- decode.subfield(
     ["code", "rich_text"],
@@ -146,7 +170,16 @@ pub fn with_children(parent: Block, children: List(Block)) -> Block {
     Paragraph(t, _) -> Paragraph(t, children)
     BulletedListItem(t, _) -> BulletedListItem(t, children)
     NumberedListItem(t, _) -> NumberedListItem(t, children)
+    Table(_, col, row) -> Table(extract_rows(children), col, row)
     other -> other
+  }
+}
+
+fn extract_rows(blocks: List(Block)) -> List(List(String)) {
+  case blocks {
+    [] -> []
+    [TableRow(cells), ..rest] -> [cells, ..extract_rows(rest)]
+    [_, ..rest] -> extract_rows(rest)
   }
 }
 
@@ -224,6 +257,8 @@ fn render_block(b: Block, indent: Int, n: Int) -> #(String, Int) {
     )
     Embed(url, caption) -> #(pad <> render_embed(url, caption, pad), 1)
     Bookmark(url) -> #(pad <> "[" <> url <> "](" <> url <> ")", 1)
+    Table(rows, _col, row_header) -> #(render_table(rows, row_header, pad), 1)
+    TableRow(cells) -> #(pad <> render_row(cells), 1)
     Unsupported(kind) -> #(pad <> "<!-- unsupported: " <> kind <> " -->", 1)
   }
 }
@@ -246,6 +281,68 @@ fn render_embed(url: String, caption: String, pad: String) -> String {
   case caption {
     "" -> iframe
     _ -> iframe <> "\n" <> pad <> "*" <> caption <> "*"
+  }
+}
+
+fn render_table(
+  rows: List(List(String)),
+  row_header: Bool,
+  pad: String,
+) -> String {
+  case rows {
+    [] -> pad <> "<!-- empty table -->"
+    [header, ..body] -> {
+      let width = list.length(header)
+      let header_line = pad <> render_row(header)
+      let sep_line = pad <> render_separator(width, row_header)
+      let body_lines =
+        list.map(body, fn(r) { pad <> render_row(pad_row(r, width)) })
+      string.join([header_line, sep_line, ..body_lines], "\n")
+    }
+  }
+}
+
+fn render_row(cells: List(String)) -> String {
+  "| " <> string.join(list.map(cells, escape_cell), " | ") <> " |"
+}
+
+fn escape_cell(text: String) -> String {
+  string.replace(text, "|", "\\|")
+}
+
+fn render_separator(width: Int, row_header: Bool) -> String {
+  case width <= 0 {
+    True -> "|---|"
+    False -> {
+      let cols = separator_cols(width, row_header, 1, [])
+      "| " <> string.join(cols, " | ") <> " |"
+    }
+  }
+}
+
+fn separator_cols(
+  width: Int,
+  row_header: Bool,
+  i: Int,
+  acc: List(String),
+) -> List(String) {
+  case i > width {
+    True -> list.reverse(acc)
+    False -> {
+      let col = case row_header, i {
+        True, 1 -> ":---"
+        _, _ -> "---"
+      }
+      separator_cols(width, row_header, i + 1, [col, ..acc])
+    }
+  }
+}
+
+fn pad_row(row: List(String), width: Int) -> List(String) {
+  let missing = width - list.length(row)
+  case missing > 0 {
+    True -> list.append(row, list.repeat("", missing))
+    False -> row
   }
 }
 
@@ -287,14 +384,128 @@ fn walk_lines(lines: List(String), acc: List(Json)) -> List(Json) {
       }
       walk_lines(tail, [code_block_json(code, lang), ..acc])
     }
-    [line, ..rest] ->
-      case classify_line(line) {
-        ClSkip -> walk_lines(rest, acc)
-        ClListItem(_, _, _) -> {
-          let #(items, tail) = consume_list(lines, 0)
-          walk_lines(tail, list.append(list.reverse(items), acc))
+    _ ->
+      case maybe_table(lines) {
+        Some(#(table_json, tail)) -> walk_lines(tail, [table_json, ..acc])
+        None ->
+          case lines {
+            [line, ..rest] ->
+              case classify_line(line) {
+                ClSkip -> walk_lines(rest, acc)
+                ClListItem(_, _, _) -> {
+                  let #(items, tail) = consume_list(lines, 0)
+                  walk_lines(tail, list.append(list.reverse(items), acc))
+                }
+                ClNonList(_, j) -> walk_lines(rest, [j, ..acc])
+              }
+            [] -> list.reverse(acc)
+          }
+      }
+  }
+}
+
+fn maybe_table(lines: List(String)) -> Option(#(Json, List(String))) {
+  case lines {
+    [h, sep, r1, ..rest] ->
+      case is_table_line(h), parse_sep_line(sep), is_table_line(r1) {
+        True, Some(row_header), True -> {
+          let header = split_row(h)
+          let width = list.length(header)
+          let #(body_rows, tail) = collect_body_rows([r1, ..rest], [])
+          let all_rows = [header, ..list.map(body_rows, pad_to(_, width))]
+          Some(#(table_json(all_rows, row_header), tail))
         }
-        ClNonList(_, j) -> walk_lines(rest, [j, ..acc])
+        _, _, _ -> None
+      }
+    _ -> None
+  }
+}
+
+fn is_table_line(line: String) -> Bool {
+  let t = string.trim(line)
+  string.contains(t, "|") && !string.starts_with(t, "```")
+}
+
+fn parse_sep_line(line: String) -> Option(Bool) {
+  let t = string.trim(line)
+  case string.contains(t, "|") && string.contains(t, "-") && sep_chars_only(t) {
+    False -> None
+    True -> {
+      // Split and check if first non-empty segment starts with ':'.
+      let segs = split_row(t)
+      case segs {
+        [first, ..] -> Some(string.starts_with(string.trim(first), ":"))
+        [] -> Some(False)
+      }
+    }
+  }
+}
+
+fn sep_chars_only(s: String) -> Bool {
+  case string.pop_grapheme(s) {
+    Error(_) -> True
+    Ok(#(ch, rest)) ->
+      case ch {
+        "|" | "-" | ":" | " " | "\t" -> sep_chars_only(rest)
+        _ -> False
+      }
+  }
+}
+
+fn collect_body_rows(
+  lines: List(String),
+  acc: List(List(String)),
+) -> #(List(List(String)), List(String)) {
+  case lines {
+    [] -> #(list.reverse(acc), [])
+    [l, ..rest] ->
+      case is_table_line(l) {
+        True -> collect_body_rows(rest, [split_row(l), ..acc])
+        False -> #(list.reverse(acc), lines)
+      }
+  }
+}
+
+fn split_row(line: String) -> List(String) {
+  let t = string.trim(line)
+  let inner = case string.starts_with(t, "|") {
+    True -> string.drop_start(t, 1)
+    False -> t
+  }
+  let inner2 = case string.ends_with(inner, "|") {
+    True -> string.drop_end(inner, 1)
+    False -> inner
+  }
+  split_cells(inner2, "", [])
+  |> list.map(fn(c) { string.trim(unescape_pipe(c)) })
+}
+
+fn split_cells(src: String, current: String, acc: List(String)) -> List(String) {
+  case string.pop_grapheme(src) {
+    Error(_) -> list.reverse([current, ..acc])
+    Ok(#("\\", rest)) ->
+      case string.pop_grapheme(rest) {
+        Ok(#("|", rest2)) -> split_cells(rest2, current <> "\\|", acc)
+        Ok(#(c, rest2)) -> split_cells(rest2, current <> "\\" <> c, acc)
+        Error(_) -> list.reverse([current <> "\\", ..acc])
+      }
+    Ok(#("|", rest)) -> split_cells(rest, "", [current, ..acc])
+    Ok(#(c, rest)) -> split_cells(rest, current <> c, acc)
+  }
+}
+
+fn unescape_pipe(s: String) -> String {
+  string.replace(s, "\\|", "|")
+}
+
+fn pad_to(row: List(String), width: Int) -> List(String) {
+  let missing = width - list.length(row)
+  case missing > 0 {
+    True -> list.append(row, list.repeat("", missing))
+    False ->
+      case missing < 0 {
+        True -> list.take(row, width)
+        False -> row
       }
   }
 }
@@ -603,6 +814,31 @@ fn image_json(url: String, caption: String) -> Json {
       #("type", json.string("external")),
       #("external", json.object([#("url", json.string(url))])),
       #("caption", rich_text_json(caption)),
+    ]),
+  )
+}
+
+fn table_json(rows: List(List(String)), has_row_header: Bool) -> Json {
+  let width = case rows {
+    [first, ..] -> list.length(first)
+    [] -> 0
+  }
+  let row_blocks =
+    list.map(rows, fn(cells) {
+      block_json(
+        "table_row",
+        json.object([
+          #("cells", json.array(cells, fn(c) { rich_text_json(c) })),
+        ]),
+      )
+    })
+  block_json(
+    "table",
+    json.object([
+      #("table_width", json.int(width)),
+      #("has_column_header", json.bool(True)),
+      #("has_row_header", json.bool(has_row_header)),
+      #("children", json.array(row_blocks, fn(j) { j })),
     ]),
   )
 }
