@@ -1,9 +1,10 @@
 //// Markdown ↔ Notion block conversion.
 ////
-//// Scope (v1, deliberately small):
+//// Scope (v2, phase 16):
 //// - paragraph, heading_1/2/3, bulleted_list_item, numbered_list_item,
 ////   to_do, code, quote, divider
-//// - Rich text: plain text only (no annotations, mentions, equations)
+//// - Rich text annotations + links via `notion_client/rich_text`
+////   (bold, italic, strikethrough, code, underline, colour spans).
 ////
 //// Unsupported blocks render as `<!-- unsupported: <type> -->` on read
 //// and unknown markdown lines fall through to paragraph on write.
@@ -14,6 +15,7 @@ import gleam/json.{type Json}
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/string
+import notion_client/rich_text
 
 // ─── Types ──────────────────────────────────────────────────────────────
 
@@ -53,12 +55,15 @@ pub fn block_decoder() -> Decoder(Block) {
 }
 
 fn decode_text_block(key: String, wrap: fn(String) -> Block) -> Decoder(Block) {
-  use text <- decode.subfield([key, "rich_text"], rich_text_decoder())
+  use text <- decode.subfield([key, "rich_text"], rich_text_markdown_decoder())
   decode.success(wrap(text))
 }
 
 fn decode_todo() -> Decoder(Block) {
-  use text <- decode.subfield(["to_do", "rich_text"], rich_text_decoder())
+  use text <- decode.subfield(
+    ["to_do", "rich_text"],
+    rich_text_markdown_decoder(),
+  )
   use checked <- decode.subfield(
     ["to_do", "checked"],
     decode.optional(decode.bool),
@@ -67,7 +72,10 @@ fn decode_todo() -> Decoder(Block) {
 }
 
 fn decode_code() -> Decoder(Block) {
-  use text <- decode.subfield(["code", "rich_text"], rich_text_decoder())
+  use text <- decode.subfield(
+    ["code", "rich_text"],
+    plain_text_concat_decoder(),
+  )
   use lang <- decode.subfield(
     ["code", "language"],
     decode.optional(decode.string),
@@ -75,12 +83,17 @@ fn decode_code() -> Decoder(Block) {
   decode.success(Code(text, option.unwrap(lang, "plain text")))
 }
 
-fn rich_text_decoder() -> Decoder(String) {
-  decode.list(rich_text_item_decoder())
+fn rich_text_markdown_decoder() -> Decoder(String) {
+  rich_text.run_list_decoder()
+  |> decode.map(rich_text.runs_to_markdown)
+}
+
+fn plain_text_concat_decoder() -> Decoder(String) {
+  decode.list(plain_text_item_decoder())
   |> decode.map(string.join(_, ""))
 }
 
-fn rich_text_item_decoder() -> Decoder(String) {
+fn plain_text_item_decoder() -> Decoder(String) {
   use plain <- decode.field("plain_text", decode.optional(decode.string))
   decode.success(option.unwrap(plain, ""))
 }
@@ -101,7 +114,11 @@ pub fn to_markdown(blocks: List(Block)) -> String {
   render_blocks(blocks, 0, 1)
 }
 
-fn render_blocks(blocks: List(Block), indent: Int, _numbered_start: Int) -> String {
+fn render_blocks(
+  blocks: List(Block),
+  indent: Int,
+  _numbered_start: Int,
+) -> String {
   render_numbered(blocks, indent, 1, "")
 }
 
@@ -238,7 +255,10 @@ fn parse_numbered(line: String) -> Option(String) {
   }
 }
 
-fn take_code_block(lines: List(String), acc: List(String)) -> #(String, List(String)) {
+fn take_code_block(
+  lines: List(String),
+  acc: List(String),
+) -> #(String, List(String)) {
   case lines {
     [] -> #(string.join(list.reverse(acc), "\n"), [])
     ["```", ..rest] -> #(string.join(list.reverse(acc), "\n"), rest)
@@ -250,6 +270,10 @@ fn take_code_block(lines: List(String), acc: List(String)) -> #(String, List(Str
 // ─── JSON constructors ─────────────────────────────────────────────────
 
 fn rich_text_json(text: String) -> Json {
+  rich_text.runs_to_json(rich_text.markdown_to_runs(text))
+}
+
+fn plain_rich_text_json(text: String) -> Json {
   json.array([text], fn(t) {
     json.object([
       #("type", json.string("text")),
@@ -303,7 +327,7 @@ fn code_block_json(text: String, language: String) -> Json {
   block_json(
     "code",
     json.object([
-      #("rich_text", rich_text_json(text)),
+      #("rich_text", plain_rich_text_json(text)),
       #("language", json.string(language)),
     ]),
   )
