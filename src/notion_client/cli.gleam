@@ -1,7 +1,7 @@
 //// CLI entry point.
 ////
 //// ```text
-//// notion_client read <page_id> [--write-file] [--max-depth N] [--inline-synced]
+//// notion_client read <page_id> [--write-file] [--max-depth N] [--inline-synced] [--full-properties]
 //// notion_client append <page_id> <markdown>
 //// notion_client append <page_id> --from-file <path>
 //// ```
@@ -26,6 +26,7 @@ import gleam/string
 import notion_client.{type Client}
 import notion_client/error.{type NotionError}
 import notion_client/markdown.{type Block}
+import notion_client/properties
 import simplifile
 
 pub fn main() -> Nil {
@@ -40,7 +41,7 @@ pub fn main() -> Nil {
 fn print_help() -> Nil {
   io.println(
     "Usage:
-  notion_client read <page_id> [--write-file] [--max-depth N] [--inline-synced]
+  notion_client read <page_id> [--write-file] [--max-depth N] [--inline-synced] [--full-properties]
   notion_client append <page_id> <markdown>
   notion_client append <page_id> --from-file <path>
 
@@ -54,7 +55,12 @@ fn cmd_read(page_id: String, flags: List(String)) -> Nil {
   let write_file = list.contains(flags, "--write-file")
   let max_depth = parse_max_depth(flags, 3)
   let inline_synced = list.contains(flags, "--inline-synced")
-  case with_client(fn(c) { do_read(c, page_id, max_depth, inline_synced) }) {
+  let full_props = list.contains(flags, "--full-properties")
+  case
+    with_client(fn(c) {
+      do_read(c, page_id, max_depth, inline_synced, full_props)
+    })
+  {
     Error(msg) -> die(msg)
     Ok(#(title, body)) ->
       case write_file {
@@ -87,8 +93,16 @@ fn do_read(
   page_id: String,
   max_depth: Int,
   inline_synced: Bool,
+  full_props: Bool,
 ) -> Result(#(String, String), String) {
-  use title <- result.try(fetch_title(client, page_id))
+  use page <- result.try(fetch_page(client, page_id))
+  let title =
+    decode.run(page, title_decoder())
+    |> result.unwrap("untitled")
+  let frontmatter = case properties.render_frontmatter(page, full_props) {
+    Some(fm) -> fm <> "\n"
+    None -> ""
+  }
   use blocks <- result.try(fetch_block_tree(
     client,
     page_id,
@@ -97,20 +111,17 @@ fn do_read(
     inline_synced,
     set.new(),
   ))
-  let md = "# " <> title <> "\n\n" <> markdown.to_markdown(blocks)
+  let md =
+    frontmatter <> "# " <> title <> "\n\n" <> markdown.to_markdown(blocks)
   Ok(#(title, md))
 }
 
-fn fetch_title(client: Client, page_id: String) -> Result(String, String) {
+fn fetch_page(client: Client, page_id: String) -> Result(Dynamic, String) {
   let req =
     notion_client.base_request(client)
     |> request.set_method(http.Get)
     |> request.set_path("/v1/pages/" <> page_id)
-  use body <- result.try(send(client, req))
-  Ok(
-    decode.run(body, title_decoder())
-    |> result.unwrap("untitled"),
-  )
+  send(client, req)
 }
 
 fn title_decoder() -> decode.Decoder(String) {
