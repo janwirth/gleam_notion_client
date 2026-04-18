@@ -109,6 +109,7 @@ pub fn no_retry_calls_sender_once_test() {
       fn(_) { pop_response() },
       record_sleep,
       no_jitter,
+      fn(_, _) { Nil },
       req(http.Get),
     )
   assert call_count() == 1
@@ -125,6 +126,7 @@ pub fn retries_429_until_success_test() {
       fn(_) { pop_response() },
       record_sleep,
       no_jitter,
+      fn(_, _) { Nil },
       req(http.Post),
     )
   assert call_count() == 3
@@ -141,6 +143,7 @@ pub fn retries_500_only_on_idempotent_methods_test() {
       fn(_) { pop_response() },
       record_sleep,
       no_jitter,
+      fn(_, _) { Nil },
       req(http.Post),
     )
   assert call_count() == 1
@@ -155,6 +158,7 @@ pub fn retries_500_only_on_idempotent_methods_test() {
       fn(_) { pop_response() },
       record_sleep,
       no_jitter,
+      fn(_, _) { Nil },
       req(http.Get),
     )
   assert call_count() == 2
@@ -174,6 +178,7 @@ pub fn honors_retry_after_header_test() {
       fn(_) { pop_response() },
       record_sleep,
       no_jitter,
+      fn(_, _) { Nil },
       req(http.Get),
     )
   assert call_count() == 2
@@ -190,6 +195,7 @@ pub fn returns_last_error_when_attempts_exhausted_test() {
       fn(_) { pop_response() },
       record_sleep,
       no_jitter,
+      fn(_, _) { Nil },
       req(http.Get),
     )
   assert call_count() == 3
@@ -206,6 +212,7 @@ pub fn retries_response_timeout_transport_error_test() {
       fn(_) { pop_response() },
       record_sleep,
       no_jitter,
+      fn(_, _) { Nil },
       req(http.Get),
     )
   assert call_count() == 2
@@ -228,6 +235,7 @@ pub fn caps_backoff_at_max_delay_test() {
       fn(_) { pop_response() },
       record_sleep,
       no_jitter,
+      fn(_, _) { Nil },
       req(http.Get),
     )
   assert call_count() == 5

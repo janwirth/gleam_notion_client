@@ -40,17 +40,24 @@ pub type Sleeper =
 pub type Jitter =
   fn(Int) -> Int
 
+/// Observer fired right before each retry sleep. Arguments are the
+/// 1-based attempt number that is about to be retried and the delay
+/// (ms) that will be slept. Pass `fn(_, _) { Nil }` to ignore.
+pub type Observer =
+  fn(Int, Int) -> Nil
+
 pub fn run(
   config: RetryConfig,
   sender: Sender,
   sleep: Sleeper,
   jitter: Jitter,
+  on_retry: Observer,
   req: Request(BitArray),
 ) -> RawResult {
   case config {
     NoRetry -> sender(req)
     Backoff(max_attempts, base, cap) ->
-      attempt(sender, sleep, jitter, req, max_attempts, base, cap, 0)
+      attempt(sender, sleep, jitter, on_retry, req, max_attempts, base, cap, 0)
   }
 }
 
@@ -58,6 +65,7 @@ fn attempt(
   sender: Sender,
   sleep: Sleeper,
   jitter: Jitter,
+  on_retry: Observer,
   req: Request(BitArray),
   max_attempts: Int,
   base: Int,
@@ -72,8 +80,19 @@ fn attempt(
         True -> res
         False -> {
           let delay = compute_delay(res, base, cap, jitter, n)
+          on_retry(n + 1, delay)
           sleep(delay)
-          attempt(sender, sleep, jitter, req, max_attempts, base, cap, n + 1)
+          attempt(
+            sender,
+            sleep,
+            jitter,
+            on_retry,
+            req,
+            max_attempts,
+            base,
+            cap,
+            n + 1,
+          )
         }
       }
   }
