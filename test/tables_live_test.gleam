@@ -9,8 +9,11 @@ import gleam/http/request
 import gleam/json
 import gleam/list
 import gleam/option
+import helpers/fixtures
 import notion_client
 import notion_client/markdown
+
+const title: String = "v3:tables"
 
 @external(erlang, "os", "getenv")
 fn os_getenv(name: Charlist) -> Dynamic
@@ -38,7 +41,8 @@ pub fn table_round_trip_live_test() {
 
 fn run(token: String, db_id: String) -> Nil {
   let client = notion_client.new(token)
-  let page_id = create_row(client, db_id, "phase-20 tables")
+  fixtures.archive_by_title(client, db_id, title)
+  let page_id = fixtures.create_row(client, db_id, title, [])
   let md = "| h1 | h2 |\n|---|---|\n| a | b |\n| c | d |"
   append_body(client, page_id, md)
   let tree = fetch_tree(client, page_id, 0)
@@ -54,49 +58,6 @@ fn has_table_with_rows(blocks: List(markdown.Block), n: Int) -> Bool {
     [markdown.Table(rows, _, _), ..] if n == 3 -> list.length(rows) == n
     [_, ..rest] -> has_table_with_rows(rest, n)
   }
-}
-
-fn create_row(
-  client: notion_client.Client,
-  db_id: String,
-  title: String,
-) -> String {
-  let body =
-    json.object([
-      #("parent", json.object([#("database_id", json.string(db_id))])),
-      #(
-        "properties",
-        json.object([
-          #(
-            "Name",
-            json.object([
-              #(
-                "title",
-                json.array([title], fn(t) {
-                  json.object([
-                    #("type", json.string("text")),
-                    #("text", json.object([#("content", json.string(t))])),
-                  ])
-                }),
-              ),
-            ]),
-          ),
-        ]),
-      ),
-    ])
-  let req =
-    notion_client.base_request(client)
-    |> request.set_method(http.Post)
-    |> request.set_path("/v1/pages")
-    |> request.set_body(<<json.to_string(body):utf8>>)
-  let assert Ok(resp) = notion_client.request(client, req)
-  assert resp.status == 200
-  let id_decoder = {
-    use id <- decode.field("id", decode.string)
-    decode.success(id)
-  }
-  let assert Ok(id) = json.parse_bits(resp.body, id_decoder)
-  id
 }
 
 fn append_body(client: notion_client.Client, page_id: String, md: String) -> Nil {

@@ -11,8 +11,11 @@ import gleam/http/request
 import gleam/json
 import gleam/list
 import gleam/option
+import helpers/fixtures
 import notion_client
 import notion_client/markdown
+
+const title: String = "v3:child-page-write"
 
 @external(erlang, "os", "getenv")
 fn os_getenv(name: Charlist) -> Dynamic
@@ -40,7 +43,8 @@ pub fn child_page_write_round_trip_live_test() {
 
 fn run(token: String, db_id: String) -> Nil {
   let client = notion_client.new(token)
-  let parent = create_row(client, db_id, "phase-22 child-page write")
+  fixtures.archive_by_title(client, db_id, title)
+  let parent = fixtures.create_row(client, db_id, title, [])
   let existing = create_subpage(client, parent, "Existing Sub")
   let md =
     "intro line\n"
@@ -109,22 +113,6 @@ fn append_md(client: notion_client.Client, page_id: String, md: String) -> Nil {
   let assert Ok(resp) = notion_client.request(client, req)
   assert resp.status == 200
   Nil
-}
-
-fn create_row(
-  client: notion_client.Client,
-  db_id: String,
-  title: String,
-) -> String {
-  let body =
-    json.object([
-      #("parent", json.object([#("database_id", json.string(db_id))])),
-      #(
-        "properties",
-        json.object([#("Name", json.object([#("title", title_rt(title))]))]),
-      ),
-    ])
-  post_page(client, body)
 }
 
 fn create_subpage(

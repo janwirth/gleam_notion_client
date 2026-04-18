@@ -12,8 +12,11 @@ import gleam/json
 import gleam/list
 import gleam/option
 import gleam/set.{type Set}
+import helpers/fixtures
 import notion_client
 import notion_client/markdown
+
+const title: String = "v3:child-page-read"
 
 @external(erlang, "os", "getenv")
 fn os_getenv(name: Charlist) -> Dynamic
@@ -41,7 +44,8 @@ pub fn child_page_round_trip_live_test() {
 
 fn run(token: String, db_id: String) -> Nil {
   let client = notion_client.new(token)
-  let parent_id = create_row(client, db_id, "phase-21 child-page parent")
+  fixtures.archive_by_title(client, db_id, title)
+  let parent_id = fixtures.create_row(client, db_id, title, [])
   let sub_id = create_subpage(client, parent_id, "Sub Page")
   append_body(client, sub_id, "Hello from sub")
   let tree = fetch_tree(client, parent_id, 0, 2, set.new())
@@ -57,37 +61,6 @@ fn find_inlined_child(blocks: List(markdown.Block)) -> Bool {
     [markdown.ChildPage(_, _, _, kids, markdown.Inlined), ..] -> kids != []
     [_, ..rest] -> find_inlined_child(rest)
   }
-}
-
-fn create_row(
-  client: notion_client.Client,
-  db_id: String,
-  title: String,
-) -> String {
-  let body =
-    json.object([
-      #("parent", json.object([#("database_id", json.string(db_id))])),
-      #(
-        "properties",
-        json.object([
-          #(
-            "Name",
-            json.object([
-              #(
-                "title",
-                json.array([title], fn(t) {
-                  json.object([
-                    #("type", json.string("text")),
-                    #("text", json.object([#("content", json.string(t))])),
-                  ])
-                }),
-              ),
-            ]),
-          ),
-        ]),
-      ),
-    ])
-  post_page(client, body)
 }
 
 fn create_subpage(
