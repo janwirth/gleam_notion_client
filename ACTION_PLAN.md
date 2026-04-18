@@ -1,86 +1,75 @@
 # Notion SDK for Gleam — Action Plan
 
-Replicate [makenotion/notion-sdk-js](https://github.com/makenotion/notion-sdk-js) in Gleam.
+Replicate [makenotion/notion-sdk-js](https://github.com/makenotion/notion-sdk-js) in Gleam. **BEAM/Erlang target only.** Full API coverage, fully typed, decoder-tested against cached live responses.
 
-## HTTP Client Choice
+## Stack
 
-Per [gleam_ecosystem_review/http-clients.md](https://raw.githubusercontent.com/janwirth/gleam_ecosystem_review/refs/heads/main/gleam/http-clients.md):
+| Concern | Choice |
+|---------|--------|
+| HTTP client | `gleam_httpc` |
+| JSON | `gleam_json` + `gleam/dynamic/decode` |
+| Spec source | `Notion API.postman_collection.json` (local, 852KB) |
+| Postman → OpenAPI | **kevinswiber/postman2openapi** (Rust CLI) |
+| OpenAPI → Gleam | **oaspec** (wider OpenAPI coverage) |
+| Test framework | `gleeunit` |
+| Response cache | Per-endpoint JSON files under `test/cache/` |
 
-- **BEAM target**: `gleam_httpc` (gold, zero extra deps)
-- **JS target**: `gleam_fetch` (gold, wraps platform fetch)
-- **Cross-target strategy**: Accept a `Sender` function parameter so consumers inject `httpc.send` on BEAM or a `fetch.send` wrapper on JS. Keeps core SDK target-agnostic.
-- JSON: `gleam_json` for encode/decode.
+## Pipeline
 
-## Scope (Parity with notion-sdk-js)
+```
+Notion API.postman_collection.json
+  → postman2openapi → openapi.json
+  → oaspec generate → src/notion_client/generated/*.gleam
+  → hand-written wrappers → public API
+```
 
-### Phase 1 — Core Client
-- [ ] `Client` type with config: `auth`, `base_url`, `timeout_ms`, `notion_version`, `log_level`, `logger`, `retry`
-- [ ] Default config constants (`DEFAULT_BASE_URL`, `DEFAULT_TIMEOUT_MS`, default retry policy)
-- [ ] Generic `request` function: builds `gleam/http.Request`, injects `Authorization: Bearer`, `Notion-Version`, `Content-Type` headers
-- [ ] Parameter consolidation: one record per endpoint combining path/query/body fields; splitter derives each
+## Response Cache (multiple files)
 
-### Phase 2 — Error Handling
-- [ ] `NotionError` union: `ApiResponseError(code, status, message)` | `ClientError(ClientErrorCode)` | `RequestTimeout` | `ResponseBodyError`
-- [ ] `ApiErrorCode` enum mirroring JS SDK (`ObjectNotFound`, `Unauthorized`, `RateLimited`, `ValidationError`, etc.)
-- [ ] `ClientErrorCode` enum (`RequestTimeout`, `ResponseBodyError`, `UnknownHttpResponseError`)
-- [ ] `is_notion_client_error` helper (Result inspection)
+```
+test/cache/
+  users/
+    me.json
+    list__page_size_100.json
+  pages/
+    retrieve__<page_id>.json
+  data_sources/
+    query__<ds_id>__page_1.json
+    query__<ds_id>__page_2.json
+  blocks/
+    children_list__<block_id>.json
+```
 
-### Phase 3 — Retries
-- [ ] Exponential backoff with jitter
-- [ ] Retry on 429 (all methods), 500/503 (GET/DELETE only)
-- [ ] Honor `Retry-After` header
-- [ ] `retry: False` opt-out
+- One file per request. Key = hash of `{method, path, query, body}` → sanitized filename.
+- Cached sender: miss → live call → write file → return.
+- Env `NOTION_CACHE_MODE=replay|record|refresh`.
+- Commit all cache files; CI runs decoder tests without token.
 
-### Phase 4 — Endpoint Modules
-Mirror JS namespaces as Gleam modules:
-- [ ] `notion_client/users` — `list`, `retrieve`, `me`
-- [ ] `notion_client/data_sources` — `query`, `retrieve`, `create`, `update`
-- [ ] `notion_client/databases` — `query`, `retrieve`, `create`, `update`
-- [ ] `notion_client/pages` — `create`, `retrieve`, `update`, `properties.retrieve`
-- [ ] `notion_client/blocks` — `retrieve`, `update`, `delete`, `children.list`, `children.append`
-- [ ] `notion_client/comments` — `create`, `list`
-- [ ] `notion_client/search`
-- [ ] `notion_client/views` — `create`
-- [ ] `notion_client/oauth` — `token`, `revoke`, `introspect`
+## Task Management
 
-### Phase 5 — Pagination
-- [ ] `iterate_paginated` → returns iterator/stream (BEAM: `gleam/iterator` or lazy list; JS: yield)
-- [ ] `collect_paginated` → returns `List(a)` via recursive cursor walk
+Tasks live in `tasks/` with kanban structure:
 
-### Phase 6 — Types & Decoders
-- [ ] Request param records per endpoint
-- [ ] Response record types: `Page`, `Block`, `DataSource`, `Database`, `User`, `Comment`, `PropertyValue`, `RichText`, etc.
-- [ ] Partial vs full response variants: `Full(T)` / `Partial(id)`
-- [ ] Type guards: `is_full_page`, `is_full_block`, `is_full_data_source`, `is_full_user`, `is_full_comment`
-- [ ] JSON decoders for all responses (`gleam/dynamic/decode`)
-- [ ] JSON encoders for all request bodies
+```
+tasks/
+  todo/   -- not started
+  doing/  -- in progress
+  done/   -- completed
+```
 
-### Phase 7 — Logging
-- [ ] `LogLevel` enum: `Debug`, `Info`, `Warn`, `Error`
-- [ ] Logger type alias: `fn(LogLevel, String, Dict(String, Dynamic)) -> Nil`
-- [ ] Default console logger; pluggable
-
-### Phase 8 — Testing
-- [ ] Record/playback fixtures (mirror `dream_http_client` pattern optional)
-- [ ] Unit tests per endpoint module with recorded JSON
-- [ ] Decoder round-trip tests
-- [ ] Retry logic tests with fake clock + fake sender
+Move task file between dirs as status changes. See [tasks/README.md](tasks/README.md) for format.
 
 ## Project Layout
 
 ```
 src/
-  notion_client.gleam            -- Client, config, request runner
+  notion_client.gleam
   notion_client/
-    error.gleam                  -- NotionError, ApiErrorCode, ClientErrorCode
-    retry.gleam                  -- backoff + retry logic
-    pagination.gleam             -- iterate_paginated, collect_paginated
-    logging.gleam                -- LogLevel, default logger
-    sender.gleam                 -- Sender type alias (injected http fn)
+    error.gleam
+    retry.gleam
+    pagination.gleam
+    logging.gleam
     internal/
-      headers.gleam
-      json_helpers.gleam
-    users.gleam
+    generated/                           -- oaspec output
+    users.gleam                          -- facades over generated
     data_sources.gleam
     databases.gleam
     pages.gleam
@@ -91,28 +80,28 @@ src/
     views.gleam
     oauth.gleam
     types/
-      page.gleam
-      block.gleam
-      data_source.gleam
-      user.gleam
-      comment.gleam
-      rich_text.gleam
-      property.gleam
 test/
   notion_client_test.gleam
-  fixtures/                      -- recorded API responses
+  decoders_test.gleam
+  cache/                                 -- per-endpoint cached responses
+  helpers/
+    cached_sender.gleam
+openapi.json
+oaspec.yaml
+scripts/regenerate.sh
+tasks/{todo,doing,done}/
+Notion API.postman_collection.json
 ```
 
-## Dependencies to Add (`gleam.toml`)
+## Dependencies
 
 ```toml
 [dependencies]
 gleam_stdlib = ">= 0.44.0 and < 2.0.0"
 gleam_http = ">= 3.0.0"
-gleam_httpc = ">= 4.0.0"           # BEAM sender
-gleam_fetch = ">= 1.0.0"           # JS sender
+gleam_httpc = ">= 4.0.0"
 gleam_json = ">= 2.0.0"
-gleam_javascript = ">= 1.0.0"      # for Promise on JS target
+gleam_erlang = ">= 0.25.0"
 
 [dev_dependencies]
 gleeunit = ">= 1.0.0 and < 2.0.0"
@@ -121,26 +110,9 @@ gleeunit = ">= 1.0.0 and < 2.0.0"
 ## API Version Support
 - Default: `2025-09-03`
 - Opt-in: `2026-03-11`
-- Set via `notion_version` field on Client, sent as `Notion-Version` header.
 
-## Cross-Target Constraint
-- No direct `httpc.send` or `fetch.send` inside core modules.
-- `Client` holds a `send: fn(Request(String)) -> Result(Response(String), SendError)` field.
-- Provide two factory constructors:
-  - `notion_client.new_beam(auth)` — injects `gleam_httpc` sender
-  - `notion_client.new_js(auth)` — injects `gleam_fetch` sender (returns `Promise`)
-- Return types may need target-conditional wrapping (`Promise` on JS vs direct `Result` on BEAM). Consider two thin facade modules.
-
-## Milestones
-
-1. **M1** — Client + request runner + one endpoint (`users.me`) end-to-end on BEAM
-2. **M2** — Error + retry + logging
-3. **M3** — All endpoint modules with types/decoders
-4. **M4** — Pagination helpers
-5. **M5** — JS target parity
-6. **M6** — Docs + publish to Hex
-
-## Open Questions
-- Single SDK with injected Sender vs. two packages (`notion_client_beam`, `notion_client_js`)?
-- Depth of typed responses vs. returning `Dynamic` for caller-side decoding?
-- Auto-generate types from Notion OpenAPI spec (if published) vs. hand-write?
+## Risks
+- Notion has no public OpenAPI; postman collection may lag.
+- Both converter tools unmaintained — expect manual spec fixes.
+- `oaspec` <2 weeks old — pin version.
+- Notion deeply polymorphic (property/block types) — `oneOf` may need hand decoders.
