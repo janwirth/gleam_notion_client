@@ -1,8 +1,13 @@
 //// Notion API client (BEAM only).
 ////
+//// This module owns the public surface: the [`Client`](#Client) record,
+//// the [`new`](#new) constructor, and a low-level [`send`](#send)
+//// transport that runs requests built by `notion_client/operations`
+//// through `gleam/httpc`.
+////
 //// Generated request builders + response decoders live in
-//// `notion_client/operations` and `notion_client/schema`.
-//// Run `bash scripts/regenerate.sh` to refresh.
+//// `notion_client/operations` and `notion_client/schema`. Run
+//// `bash scripts/regenerate.sh` to refresh them.
 ////
 //// The block below the marker is overwritten by `oas/generator.build`.
 //// On BEAM we don't ship the generated facade (it depends on midas /
@@ -10,17 +15,94 @@
 //// the marker after each run.
 
 import gleam/http
-import gleam/http/request
+import gleam/http/request.{type Request}
+import gleam/http/response.{type Response}
+import gleam/httpc
+import gleam/option
+import gleam/uri
 
-/// Hand-rolled base request used by `notion_client/operations.*_request`.
-/// Returns a `Request(BitArray)` rooted at `https://api.notion.com`.
-/// Token wiring + auth headers are refined in task 05 (client record).
-pub fn base_request(token: String) -> request.Request(BitArray) {
-  request.new()
-  |> request.set_scheme(http.Https)
-  |> request.set_host("api.notion.com")
-  |> request.set_body(<<>>)
-  |> request.prepend_header("authorization", "Bearer " <> token)
-  |> request.prepend_header("notion-version", "2022-06-28")
+pub const default_base_url: String = "https://api.notion.com"
+
+pub const default_notion_version: String = "2022-06-28"
+
+pub const default_timeout_ms: Int = 30_000
+
+pub type LogLevel {
+  Silent
+  Info
+  Debug
+}
+
+pub type Retry {
+  NoRetry
+  ExponentialBackoff(max_attempts: Int, base_delay_ms: Int)
+}
+
+pub type Logger =
+  fn(String) -> Nil
+
+pub type Client {
+  Client(
+    auth: String,
+    base_url: String,
+    timeout_ms: Int,
+    notion_version: String,
+    log_level: LogLevel,
+    logger: Logger,
+    retry: Retry,
+  )
+}
+
+/// Construct a `Client` with sensible defaults. `auth` is the Notion
+/// integration token (sent as `Authorization: Bearer <auth>`).
+pub fn new(auth: String) -> Client {
+  Client(
+    auth: auth,
+    base_url: default_base_url,
+    timeout_ms: default_timeout_ms,
+    notion_version: default_notion_version,
+    log_level: Silent,
+    logger: fn(_msg) { Nil },
+    retry: NoRetry,
+  )
+}
+
+/// Build the base request consumed by `notion_client/operations.*_request`.
+/// Injects `Authorization`, `Notion-Version`, `Content-Type` and `Accept`
+/// headers, plus the scheme/host/port parsed from `client.base_url`.
+pub fn base_request(client: Client) -> Request(BitArray) {
+  let assert Ok(parsed) = uri.parse(client.base_url)
+  let scheme = case parsed.scheme {
+    option.Some("http") -> http.Http
+    _ -> http.Https
+  }
+  let host = case parsed.host {
+    option.Some(h) -> h
+    option.None -> "api.notion.com"
+  }
+  let req =
+    request.new()
+    |> request.set_scheme(scheme)
+    |> request.set_host(host)
+    |> request.set_body(<<>>)
+    |> request.prepend_header("authorization", "Bearer " <> client.auth)
+    |> request.prepend_header("notion-version", client.notion_version)
+    |> request.prepend_header("content-type", "application/json")
+    |> request.prepend_header("accept", "application/json")
+  case parsed.port {
+    option.Some(port) -> request.set_port(req, port)
+    option.None -> req
+  }
+}
+
+/// Send a fully composed request through `gleam/httpc`, honouring the
+/// client's `timeout_ms`. Retries are applied in task 07.
+pub fn send(
+  client: Client,
+  req: Request(BitArray),
+) -> Result(Response(BitArray), httpc.HttpError) {
+  httpc.configure()
+  |> httpc.timeout(client.timeout_ms)
+  |> httpc.dispatch_bits(req)
 }
 // GENERATED -------------
