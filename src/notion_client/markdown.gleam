@@ -37,7 +37,21 @@ pub type Block {
   Bookmark(url: String)
   Table(rows: List(List(String)), has_column_header: Bool, has_row_header: Bool)
   TableRow(cells: List(String))
+  ChildPage(
+    id: String,
+    title: String,
+    depth: Int,
+    children: List(Block),
+    status: ChildPageStatus,
+  )
+  ChildDatabase(id: String, title: String)
   Unsupported(kind: String)
+}
+
+pub type ChildPageStatus {
+  Inlined
+  DepthLimitReached
+  CycleDetected
 }
 
 // ─── Notion JSON → Block ────────────────────────────────────────────────
@@ -63,6 +77,8 @@ pub fn block_decoder() -> Decoder(Block) {
     "link_preview" -> decode_bookmark("link_preview")
     "table" -> decode_table()
     "table_row" -> decode_table_row()
+    "child_page" -> decode_child_page()
+    "child_database" -> decode_child_database()
     other -> decode.success(Unsupported(other))
   }
 }
@@ -137,6 +153,30 @@ fn decode_table_row() -> Decoder(Block) {
   decode.success(TableRow(cells))
 }
 
+fn decode_child_page() -> Decoder(Block) {
+  use id <- decode.field("id", decode.optional(decode.string))
+  use title <- decode.subfield(
+    ["child_page", "title"],
+    decode.optional(decode.string),
+  )
+  decode.success(ChildPage(
+    option.unwrap(id, ""),
+    option.unwrap(title, ""),
+    0,
+    [],
+    Inlined,
+  ))
+}
+
+fn decode_child_database() -> Decoder(Block) {
+  use id <- decode.field("id", decode.optional(decode.string))
+  use title <- decode.subfield(
+    ["child_database", "title"],
+    decode.optional(decode.string),
+  )
+  decode.success(ChildDatabase(option.unwrap(id, ""), option.unwrap(title, "")))
+}
+
 fn decode_code() -> Decoder(Block) {
   use text <- decode.subfield(
     ["code", "rich_text"],
@@ -171,6 +211,8 @@ pub fn with_children(parent: Block, children: List(Block)) -> Block {
     BulletedListItem(t, _) -> BulletedListItem(t, children)
     NumberedListItem(t, _) -> NumberedListItem(t, children)
     Table(_, col, row) -> Table(extract_rows(children), col, row)
+    ChildPage(id, title, depth, _, status) ->
+      ChildPage(id, title, depth, children, status)
     other -> other
   }
 }
@@ -259,6 +301,11 @@ fn render_block(b: Block, indent: Int, n: Int) -> #(String, Int) {
     Bookmark(url) -> #(pad <> "[" <> url <> "](" <> url <> ")", 1)
     Table(rows, _col, row_header) -> #(render_table(rows, row_header, pad), 1)
     TableRow(cells) -> #(pad <> render_row(cells), 1)
+    ChildPage(id, title, depth, kids, status) -> #(
+      render_child_page(id, title, depth, kids, status, pad, indent),
+      1,
+    )
+    ChildDatabase(id, title) -> #(render_child_database(id, title, pad), 1)
     Unsupported(kind) -> #(pad <> "<!-- unsupported: " <> kind <> " -->", 1)
   }
 }
@@ -344,6 +391,41 @@ fn pad_row(row: List(String), width: Int) -> List(String) {
     True -> list.append(row, list.repeat("", missing))
     False -> row
   }
+}
+
+fn render_child_page(
+  id: String,
+  title: String,
+  depth: Int,
+  kids: List(Block),
+  status: ChildPageStatus,
+  pad: String,
+  indent: Int,
+) -> String {
+  case status {
+    DepthLimitReached -> pad <> "<!-- child_page:" <> id <> " (depth limit) -->"
+    CycleDetected -> pad <> "<!-- child_page:" <> id <> " (cycle) -->"
+    Inlined -> {
+      let open =
+        pad
+        <> "<!-- child_page:"
+        <> id
+        <> " depth="
+        <> int.to_string(depth)
+        <> " -->"
+      let heading = pad <> "## " <> title
+      let body = case kids {
+        [] -> ""
+        _ -> "\n\n" <> render_blocks(kids, indent, 1)
+      }
+      let close = pad <> "<!-- /child_page:" <> id <> " -->"
+      open <> "\n" <> heading <> body <> "\n" <> close
+    }
+  }
+}
+
+fn render_child_database(id: String, title: String, pad: String) -> String {
+  pad <> "<!-- child_database:" <> id <> " title=\"" <> title <> "\" -->"
 }
 
 fn render_children(children: List(Block), indent: Int) -> String {

@@ -1,7 +1,7 @@
 //// CLI entry point.
 ////
 //// ```text
-//// notion_client read <page_id> [--write-file]
+//// notion_client read <page_id> [--write-file] [--max-depth N]
 //// notion_client append <page_id> <markdown>
 //// notion_client append <page_id> --from-file <path>
 //// ```
@@ -9,17 +9,19 @@
 //// Env: `NOTION_TOKEN` (required), `NOTION_API_VERSION` (optional).
 
 import argv
+import envoy
 import gleam/dict
 import gleam/dynamic.{type Dynamic}
 import gleam/dynamic/decode
-import envoy
 import gleam/http
 import gleam/http/request
+import gleam/int
 import gleam/io
 import gleam/json
 import gleam/list
 import gleam/option.{None, Some}
 import gleam/result
+import gleam/set.{type Set}
 import gleam/string
 import notion_client.{type Client}
 import notion_client/error.{type NotionError}
@@ -38,7 +40,7 @@ pub fn main() -> Nil {
 fn print_help() -> Nil {
   io.println(
     "Usage:
-  notion_client read <page_id> [--write-file]
+  notion_client read <page_id> [--write-file] [--max-depth N]
   notion_client append <page_id> <markdown>
   notion_client append <page_id> --from-file <path>
 
@@ -50,7 +52,8 @@ Env: NOTION_TOKEN required.",
 
 fn cmd_read(page_id: String, flags: List(String)) -> Nil {
   let write_file = list.contains(flags, "--write-file")
-  case with_client(fn(c) { do_read(c, page_id) }) {
+  let max_depth = parse_max_depth(flags, 3)
+  case with_client(fn(c) { do_read(c, page_id, max_depth) }) {
     Error(msg) -> die(msg)
     Ok(#(title, body)) ->
       case write_file {
@@ -66,12 +69,31 @@ fn cmd_read(page_id: String, flags: List(String)) -> Nil {
   }
 }
 
+fn parse_max_depth(flags: List(String), default: Int) -> Int {
+  case flags {
+    [] -> default
+    ["--max-depth", n, ..] ->
+      case int.parse(n) {
+        Ok(v) if v >= 0 -> v
+        _ -> default
+      }
+    [_, ..rest] -> parse_max_depth(rest, default)
+  }
+}
+
 fn do_read(
   client: Client,
   page_id: String,
+  max_depth: Int,
 ) -> Result(#(String, String), String) {
   use title <- result.try(fetch_title(client, page_id))
-  use blocks <- result.try(fetch_block_tree(client, page_id))
+  use blocks <- result.try(fetch_block_tree(
+    client,
+    page_id,
+    0,
+    max_depth,
+    set.new(),
+  ))
   let md = "# " <> title <> "\n\n" <> markdown.to_markdown(blocks)
   Ok(#(title, md))
 }
@@ -124,18 +146,67 @@ fn plain_text_decoder() -> decode.Decoder(String) {
 fn fetch_block_tree(
   client: Client,
   block_id: String,
+  depth: Int,
+  max_depth: Int,
+  visited: Set(String),
 ) -> Result(List(Block), String) {
   use entries <- result.try(fetch_children_page(client, block_id))
   list.try_map(entries, fn(entry) {
     let #(b, id, has_children) = entry
-    case has_children {
-      False -> Ok(b)
-      True -> {
-        use kids <- result.try(fetch_block_tree(client, id))
-        Ok(markdown.with_children(b, kids))
-      }
+    case b {
+      markdown.ChildPage(cp_id, title, _, _, _) ->
+        resolve_child_page(client, cp_id, title, depth, max_depth, visited)
+      _ ->
+        case has_children {
+          False -> Ok(b)
+          True -> {
+            use kids <- result.try(fetch_block_tree(
+              client,
+              id,
+              depth,
+              max_depth,
+              visited,
+            ))
+            Ok(markdown.with_children(b, kids))
+          }
+        }
     }
   })
+}
+
+fn resolve_child_page(
+  client: Client,
+  cp_id: String,
+  title: String,
+  depth: Int,
+  max_depth: Int,
+  visited: Set(String),
+) -> Result(Block, String) {
+  case set.contains(visited, cp_id) {
+    True ->
+      Ok(markdown.ChildPage(cp_id, title, depth, [], markdown.CycleDetected))
+    False ->
+      case depth >= max_depth {
+        True ->
+          Ok(markdown.ChildPage(
+            cp_id,
+            title,
+            depth,
+            [],
+            markdown.DepthLimitReached,
+          ))
+        False -> {
+          use kids <- result.try(fetch_block_tree(
+            client,
+            cp_id,
+            depth + 1,
+            max_depth,
+            set.insert(visited, cp_id),
+          ))
+          Ok(markdown.ChildPage(cp_id, title, depth + 1, kids, markdown.Inlined))
+        }
+      }
+  }
 }
 
 fn fetch_children_page(
@@ -159,10 +230,7 @@ fn children_decoder() -> decode.Decoder(List(#(Block, String, Bool))) {
 fn block_entry_decoder() -> decode.Decoder(#(Block, String, Bool)) {
   use b <- decode.then(markdown.block_decoder())
   use id <- decode.field("id", decode.string)
-  use has_children <- decode.field(
-    "has_children",
-    decode.optional(decode.bool),
-  )
+  use has_children <- decode.field("has_children", decode.optional(decode.bool))
   decode.success(#(b, id, option.unwrap(has_children, False)))
 }
 
