@@ -6,6 +6,7 @@
 //// notion_cli comment <page_id> <text>
 //// notion_cli comments <block_or_page_id> [--json]
 //// notion_cli iframe <page_id> <url>
+//// notion_cli title <page_id>
 //// ```
 ////
 //// `fetch` requires a page id; if the positional argument is omitted
@@ -64,6 +65,7 @@ pub fn main() -> Nil {
     ["princess", "--json", "--all", page_id] -> cmd_princess(page_id, True, True)
     ["iframe", page_id, url] -> cmd_iframe(page_id, url)
     ["embed", page_id, url] -> cmd_iframe(page_id, url)
+    ["title", page_id] -> cmd_title(page_id)
     _ -> print_help()
   }
 }
@@ -107,6 +109,12 @@ COMMANDS
       Append a Notion `embed` block (rendered as an iframe) to the
       given page with the given URL. Prints the new block id on
       success. Use this to programmatically drop iframes onto a page.
+
+  title <page_id>
+      Fetch the page and print its title on one line. Prints an empty
+      line (exit 0) when the page has no title. Used by callers that
+      want a human-readable label for a page id (e.g. browser tab
+      titles) without parsing the full markdown render.
 
   comments <block_or_page_id> [--json]
       List comments attached to a block or page. Notion's comments
@@ -922,6 +930,29 @@ fn created_block_id_decoder() -> decode.Decoder(String) {
   case results {
     [first, ..] -> decode.success(first)
     [] -> decode.failure("", "no created block")
+  }
+}
+
+// ─── title (page title lookup) ─────────────────────────────────────────
+//
+// `notion_cli title <page_id>` — fetch a page and print its title on
+// one line of stdout. Used by empress (notion_harness.fetch_page_title)
+// to put the linked page name in the browser tab. Prints an empty line
+// (and exits 0) when the page exists but has no title; dies on an API
+// or decode failure so the caller can fall back to a path-based title.
+fn cmd_title(page_id: String) -> Nil {
+  case with_client(fn(c) { do_title(c, page_id) }) {
+    Ok(t) -> io.println(t)
+    Error(msg) -> die(msg)
+  }
+}
+
+fn do_title(client: Client, page_id: String) -> Result(String, String) {
+  use page <- result.try(get_json(client, "/v1/pages/" <> page_id))
+  case decode.run(page, title_decoder()) {
+    Ok("untitled") -> Ok("")
+    Ok(t) -> Ok(t)
+    Error(_) -> Ok("")
   }
 }
 
