@@ -5,6 +5,7 @@
 //// notion_cli check <block_id> [--uncheck]
 //// notion_cli comment <page_id> <text>
 //// notion_cli comments <block_or_page_id> [--json]
+//// notion_cli iframe <page_id> <url>
 //// ```
 ////
 //// `fetch` requires a page id; if the positional argument is omitted
@@ -55,6 +56,8 @@ pub fn main() -> Nil {
     ["princess", page_id] -> cmd_princess(page_id, False)
     ["princess", page_id, "--json"] -> cmd_princess(page_id, True)
     ["princess", "--json", page_id] -> cmd_princess(page_id, True)
+    ["iframe", page_id, url] -> cmd_iframe(page_id, url)
+    ["embed", page_id, url] -> cmd_iframe(page_id, url)
     _ -> print_help()
   }
 }
@@ -93,6 +96,11 @@ COMMANDS
       rather than at the page level. All remaining args are joined
       with spaces and posted as a single paragraph. Prints \"ok\"
       on success.
+
+  iframe <page_id> <url>   (alias: embed)
+      Append a Notion `embed` block (rendered as an iframe) to the
+      given page with the given URL. Prints the new block id on
+      success. Use this to programmatically drop iframes onto a page.
 
   comments <block_or_page_id> [--json]
       List comments attached to a block or page. Notion's comments
@@ -801,6 +809,50 @@ fn do_create_princess(
   case decode.run(resp, created_block_id_decoder()) {
     Ok(id) -> Ok(id)
     Error(_) -> Error("could not read new callout id from response")
+  }
+}
+
+// ─── iframe (embed block append) ───────────────────────────────────────
+//
+// Append a Notion `embed` block with a given URL to a page (or any
+// block that accepts children). Notion renders embeds as inline
+// iframes; this is what you want for "create iframes in notion pages".
+
+fn cmd_iframe(page_id: String, url: String) -> Nil {
+  case string.trim(url) {
+    "" -> die("iframe: url is empty")
+    u ->
+      case with_client(fn(c) { do_create_iframe(c, page_id, u) }) {
+        Error(msg) -> die(msg)
+        Ok(id) -> io.println(id)
+      }
+  }
+}
+
+fn do_create_iframe(
+  client: Client,
+  page_id: String,
+  url: String,
+) -> Result(String, String) {
+  let embed_block =
+    json.object([
+      #("object", json.string("block")),
+      #("type", json.string("embed")),
+      #("embed", json.object([#("url", json.string(url))])),
+    ])
+  let body =
+    json.object([
+      #("children", json.preprocessed_array([embed_block])),
+    ])
+  let req =
+    notion_client.base_request(client)
+    |> request.set_method(http.Patch)
+    |> request.set_path("/v1/blocks/" <> page_id <> "/children")
+    |> request.set_body(<<json.to_string(body):utf8>>)
+  use resp <- result.try(send_json(client, req))
+  case decode.run(resp, created_block_id_decoder()) {
+    Ok(id) -> Ok(id)
+    Error(_) -> Error("could not read new embed block id from response")
   }
 }
 
