@@ -53,9 +53,15 @@ pub fn main() -> Nil {
     ["comments", id, "--json"] -> cmd_comments(id, True)
     ["comments", "--json", id] -> cmd_comments(id, True)
     ["princess", "create", page_id] -> cmd_princess_create(page_id)
-    ["princess", page_id] -> cmd_princess(page_id, False)
-    ["princess", page_id, "--json"] -> cmd_princess(page_id, True)
-    ["princess", "--json", page_id] -> cmd_princess(page_id, True)
+    ["princess", page_id] -> cmd_princess(page_id, False, False)
+    ["princess", page_id, "--json"] -> cmd_princess(page_id, True, False)
+    ["princess", "--json", page_id] -> cmd_princess(page_id, True, False)
+    ["princess", page_id, "--all"] -> cmd_princess(page_id, False, True)
+    ["princess", page_id, "--all", "--json"] -> cmd_princess(page_id, True, True)
+    ["princess", page_id, "--json", "--all"] -> cmd_princess(page_id, True, True)
+    ["princess", "--all", page_id] -> cmd_princess(page_id, False, True)
+    ["princess", "--all", "--json", page_id] -> cmd_princess(page_id, True, True)
+    ["princess", "--json", "--all", page_id] -> cmd_princess(page_id, True, True)
     ["iframe", page_id, url] -> cmd_iframe(page_id, url)
     ["embed", page_id, url] -> cmd_iframe(page_id, url)
     _ -> print_help()
@@ -462,7 +468,7 @@ fn short_user_id(id: String) -> String {
 const princess_emoji: String = "👸"
 
 type PrincessTodo {
-  PrincessTodo(id: String, text: String, checked: Bool)
+  PrincessTodo(id: String, text: String, checked: Bool, depth: Int)
 }
 
 type PrincessResult {
@@ -474,8 +480,8 @@ type PrincessResult {
   PrincessMissing
 }
 
-fn cmd_princess(page_id: String, json_out: Bool) -> Nil {
-  case with_client(fn(c) { do_find_princess(c, page_id) }) {
+fn cmd_princess(page_id: String, json_out: Bool, include_checked: Bool) -> Nil {
+  case with_client(fn(c) { do_find_princess(c, page_id, include_checked) }) {
     Error(msg) -> die(msg)
     Ok(result) ->
       case json_out {
@@ -488,15 +494,18 @@ fn cmd_princess(page_id: String, json_out: Bool) -> Nil {
 fn do_find_princess(
   client: Client,
   page_id: String,
+  include_checked: Bool,
 ) -> Result(PrincessResult, String) {
   use children <- result.try(list_children_raw(client, page_id))
   case find_princess_callout(children) {
     None -> Ok(PrincessMissing)
     Some(#(callout_id, header_text)) -> {
       use todo_children <- result.try(list_children_raw(client, callout_id))
-      use todos <- result.try(collect_open_todos_recursive(
+      use todos <- result.try(collect_todos_recursive(
         client,
         todo_children,
+        0,
+        include_checked,
       ))
       // Render the callout's non-todo content as markdown so callers
       // (empress → "Let's rule" prompt) see workflow notes + specific
@@ -512,7 +521,7 @@ fn do_find_princess(
       let body =
         annotated
         |> list.filter(fn(ab) { !is_todo_block(ab.block) })
-        |> markdown.to_markdown_annotated
+        |> render_callout_body
       let content_markdown = case string.trim(header_text), string.trim(body) {
         "", b -> b
         h, "" -> h
@@ -528,6 +537,21 @@ fn is_todo_block(b: Block) -> Bool {
     markdown.ToDo(_, _) -> True
     _ -> False
   }
+}
+
+/// Render the callout's body blocks for human display + the empress
+/// "Let's rule" prompt. Each block becomes its own markdown paragraph
+/// separated by a blank line so consecutive paragraphs stay visually
+/// distinct and shift-enter `\n` line breaks inside a paragraph
+/// survive. We deliberately drop the block_id `[//]: # (...)` comments
+/// `to_markdown_annotated` would emit — the callout body is read by
+/// humans and fed verbatim to Claude, neither of which needs the
+/// per-block grep handle.
+fn render_callout_body(blocks: List(AnnotatedBlock)) -> String {
+  blocks
+  |> list.map(fn(ab) { markdown.to_markdown([ab.block]) })
+  |> list.filter(fn(s) { string.trim(s) != "" })
+  |> string.join("\n\n")
 }
 
 /// Return the raw list of child block JSON under a parent. We use the
@@ -617,19 +641,39 @@ fn callout_emoji_decoder() -> decode.Decoder(Option(String)) {
 /// into sub-children as discovered. Parent checked-state is ignored: a
 /// checked parent may still carry open sub-todos, which we do want to
 /// surface.
-fn collect_open_todos_recursive(
+fn collect_todos_recursive(
   client: Client,
   children: List(Dynamic),
+  depth: Int,
+  include_checked: Bool,
 ) -> Result(List(PrincessTodo), String) {
   list.try_fold(children, [], fn(acc, block) {
-    let this = case decode.run(block, open_todo_decoder()) {
-      Ok(Some(t)) -> [t]
-      _ -> []
+    let matched = case decode.run(block, todo_decoder(depth, include_checked)) {
+      Ok(Some(t)) -> Some(t)
+      _ -> None
+    }
+    let this = case matched {
+      Some(t) -> [t]
+      None -> []
+    }
+    // A nested to_do is one level deeper than its parent. For
+    // non-to_do containers (toggles, bullets, callouts) we keep depth
+    // the same. When surfacing checked todos too, bumping depth for
+    // any to_do parent (open OR checked) keeps the visual hierarchy
+    // consistent.
+    let next_depth = case decode.run(block, block_type_decoder()) {
+      Ok("to_do") -> depth + 1
+      _ -> depth
     }
     case decode.run(block, block_id_and_children_decoder()) {
       Ok(#(id, True)) -> {
         use sub <- result.try(list_children_raw(client, id))
-        use nested <- result.try(collect_open_todos_recursive(client, sub))
+        use nested <- result.try(collect_todos_recursive(
+          client,
+          sub,
+          next_depth,
+          include_checked,
+        ))
         Ok(list.flatten([acc, this, nested]))
       }
       _ -> Ok(list.flatten([acc, this]))
@@ -647,7 +691,10 @@ fn block_id_and_children_decoder() -> decode.Decoder(#(String, Bool)) {
   decode.success(#(id, has_children))
 }
 
-fn open_todo_decoder() -> decode.Decoder(Option(PrincessTodo)) {
+fn todo_decoder(
+  depth: Int,
+  include_checked: Bool,
+) -> decode.Decoder(Option(PrincessTodo)) {
   use type_ <- decode.field("type", decode.string)
   case type_ {
     "to_do" -> {
@@ -661,13 +708,14 @@ fn open_todo_decoder() -> decode.Decoder(Option(PrincessTodo)) {
         decode.optional(decode.bool),
       )
       let c = option.unwrap(checked, False)
-      case c {
-        True -> decode.success(None)
-        False ->
+      case c, include_checked {
+        True, False -> decode.success(None)
+        _, _ ->
           decode.success(Some(PrincessTodo(
             id: id,
             text: string.join(text, ""),
-            checked: False,
+            checked: c,
+            depth: depth,
           )))
       }
     }
@@ -701,6 +749,7 @@ fn princess_to_json(r: PrincessResult) -> String {
                   #("id", json.string(t.id)),
                   #("text", json.string(t.text)),
                   #("checked", json.bool(t.checked)),
+                  #("depth", json.int(t.depth)),
                 ])
               }),
             ),
@@ -720,7 +769,13 @@ fn princess_to_text(r: PrincessResult) -> String {
         [] -> "(no open todos)"
         _ ->
           string.join(
-            list.map(todos, fn(t) { "- [ ] " <> t.id <> " " <> t.text }),
+            list.map(todos, fn(t) {
+              let box = case t.checked {
+                True -> "- [x] "
+                False -> "- [ ] "
+              }
+              string.repeat("  ", t.depth) <> box <> t.id <> " " <> t.text
+            }),
             "\n",
           )
       }
