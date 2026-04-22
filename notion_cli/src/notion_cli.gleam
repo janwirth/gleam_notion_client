@@ -818,6 +818,39 @@ fn do_create_princess(
   client: Client,
   page_id: String,
 ) -> Result(String, String) {
+  // Seed a single example to_do so a freshly-created empress block is
+  // never an empty callout — the first thing the user sees is a
+  // concrete, editable item they can replace with their real request.
+  let example_todo =
+    json.object([
+      #("object", json.string("block")),
+      #("type", json.string("to_do")),
+      #(
+        "to_do",
+        json.object([
+          #(
+            "rich_text",
+            json.preprocessed_array([
+              json.object([
+                #("type", json.string("text")),
+                #(
+                  "text",
+                  json.object([
+                    #(
+                      "content",
+                      json.string(
+                        "example todo — replace with what you want empress to do",
+                      ),
+                    ),
+                  ]),
+                ),
+              ]),
+            ]),
+          ),
+          #("checked", json.bool(False)),
+        ]),
+      ),
+    ])
   let callout_block =
     json.object([
       #("object", json.string("block")),
@@ -850,6 +883,7 @@ fn do_create_princess(
             ]),
           ),
           #("color", json.string("gray_background")),
+          #("children", json.preprocessed_array([example_todo])),
         ]),
       ),
     ])
