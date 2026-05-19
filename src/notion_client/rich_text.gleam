@@ -46,19 +46,32 @@ pub fn plain(text: String) -> Run {
 pub fn runs_to_markdown(runs: List(Run)) -> String {
   runs
   |> collapse
-  |> list.map(render_run)
+  |> list.map(render_run(_, False))
   |> string.join("")
 }
 
-fn render_run(run: Run) -> String {
+/// Like `runs_to_markdown` but renders strikethrough as
+/// `~~[CANCELLED] text~~` so cancelled work is unmissable when humans or
+/// agents read fetched pages. The round-trip variant
+/// `runs_to_markdown` stays symmetric with `markdown_to_runs` for
+/// writers.
+pub fn runs_to_markdown_display(runs: List(Run)) -> String {
+  runs
+  |> collapse
+  |> list.map(render_run(_, True))
+  |> string.join("")
+}
+
+fn render_run(run: Run, emphasize_cancelled: Bool) -> String {
   let t = escape(run.text)
   let t = case run.code {
     True -> "`" <> t <> "`"
     False -> t
   }
-  let t = case run.strikethrough {
-    True -> "~~" <> t <> "~~"
-    False -> t
+  let t = case run.strikethrough, emphasize_cancelled {
+    True, True -> "~~[CANCELLED] " <> t <> "~~"
+    True, False -> "~~" <> t <> "~~"
+    False, _ -> t
   }
   let t = case run.bold {
     True -> "**" <> t <> "**"

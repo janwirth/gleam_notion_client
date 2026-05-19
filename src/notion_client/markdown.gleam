@@ -223,7 +223,7 @@ fn decode_code() -> Decoder(Block) {
 
 fn rich_text_markdown_decoder() -> Decoder(String) {
   rich_text.run_list_decoder()
-  |> decode.map(rich_text.runs_to_markdown)
+  |> decode.map(rich_text.runs_to_markdown_display)
 }
 
 fn plain_text_concat_decoder() -> Decoder(String) {
@@ -262,6 +262,68 @@ fn extract_rows(blocks: List(Block)) -> List(List(String)) {
 
 pub fn to_markdown(blocks: List(Block)) -> String {
   render_blocks(blocks, 0, 1)
+}
+
+/// Agent-oriented rendering: each block is preceded by a markdown
+/// link-label comment carrying its Notion block id:
+///
+///     [//]: # (notion_block_id: 1234…)
+///     - [ ] buy milk
+///
+/// Comments are invisible in rendered markdown and greppable by id.
+pub type AnnotatedBlock {
+  AnnotatedBlock(id: String, block: Block, children: List(AnnotatedBlock))
+}
+
+pub fn to_markdown_annotated(blocks: List(AnnotatedBlock)) -> String {
+  render_annotated_list(blocks, 0, 1, "")
+}
+
+fn render_annotated_list(
+  blocks: List(AnnotatedBlock),
+  indent: Int,
+  n: Int,
+  acc: String,
+) -> String {
+  case blocks {
+    [] -> acc
+    [b, ..rest] -> {
+      let #(rendered, next_n) = render_annotated_block(b, indent, n)
+      let sep = case acc {
+        "" -> ""
+        _ -> "\n"
+      }
+      render_annotated_list(rest, indent, next_n, acc <> sep <> rendered)
+    }
+  }
+}
+
+fn render_annotated_block(
+  idb: AnnotatedBlock,
+  indent: Int,
+  n: Int,
+) -> #(String, Int) {
+  let pad = string.repeat("  ", indent)
+  let ann = pad <> "[//]: # (notion_block_id: " <> idb.id <> ")"
+  let stripped = strip_constructor_children(idb.block)
+  let #(body, next_n) = render_block(stripped, indent, n)
+  let kids_md = case idb.children {
+    [] -> ""
+    _ -> "\n" <> render_annotated_list(idb.children, indent + 1, 1, "")
+  }
+  #(ann <> "\n" <> body <> kids_md, next_n)
+}
+
+fn strip_constructor_children(b: Block) -> Block {
+  case b {
+    Paragraph(t, _) -> Paragraph(t, [])
+    BulletedListItem(t, _) -> BulletedListItem(t, [])
+    NumberedListItem(t, _) -> NumberedListItem(t, [])
+    ChildPage(id, title, depth, _, status) ->
+      ChildPage(id, title, depth, [], status)
+    SyncedBlock(id, src, _, status) -> SyncedBlock(id, src, [], status)
+    other -> other
+  }
 }
 
 fn render_blocks(
