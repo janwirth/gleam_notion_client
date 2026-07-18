@@ -63,6 +63,8 @@ pub fn main() -> Nil {
     ["princess", "--all", page_id] -> cmd_princess(page_id, False, True)
     ["princess", "--all", "--json", page_id] -> cmd_princess(page_id, True, True)
     ["princess", "--json", "--all", page_id] -> cmd_princess(page_id, True, True)
+    ["checkmark", "ensure", page_id] -> cmd_checkmark_ensure(page_id)
+    ["checkmark", "move", block_id] -> cmd_checkmark_move(block_id)
     ["iframe", page_id, url] -> cmd_iframe(page_id, url)
     ["embed", page_id, url] -> cmd_iframe(page_id, url)
     ["title", page_id] -> cmd_title(page_id)
@@ -105,6 +107,21 @@ COMMANDS
       with spaces and posted as a single paragraph. Prints \"ok\"
       on success.
 
+  checkmark ensure <page_id>
+      Get-or-create the ✅ \"done\" callout on the page. If a callout
+      with the ✅ emoji already exists, prints its block id. Otherwise
+      creates one — positioned right after the 👸 empress callout when
+      one is present, or appended to the page otherwise — and prints
+      the new block id.
+
+  checkmark move <block_id>
+      Move a completed to_do into the ✅ callout on its page. Ensures
+      the checkmark callout exists (creating it if not), appends a
+      checked copy of the to_do as a child of that callout, then
+      archives the original block. Walks parent pointers so the todo
+      can be nested arbitrarily under the empress callout. Prints the
+      new to_do's block id on success.
+
   iframe <page_id> <url>   (alias: embed)
       Append a Notion `embed` block (rendered as an iframe) to the
       given page with the given URL. Prints the new block id on
@@ -134,6 +151,8 @@ AGENT WORKFLOW
      line \"[//]: # (notion_block_id: <ID>)\" gives the block id.
      Grep: grep -B1 '^- \\[ \\]' page.md
   3. notion_cli check <ID>
+  4. notion_cli comment --block <ID> \"Done: <what changed>\"
+  5. notion_cli checkmark move <ID>   (moves it into the ✅ callout)
 
 IDS
   Notion accepts either dashed UUIDs
@@ -474,6 +493,16 @@ fn short_user_id(id: String) -> String {
 // caller) can show a todo list without re-implementing the API walk.
 
 const princess_emoji: String = "👸"
+
+const checkmark_emoji: String = "✅"
+
+fn princess_emoji_variants() -> List(String) {
+  [princess_emoji, "👸🏻", "👸🏼", "👸🏽", "👸🏾", "👸🏿"]
+}
+
+fn checkmark_emoji_variants() -> List(String) {
+  [checkmark_emoji, "☑️", "☑", "✔️", "✔"]
+}
 
 type PrincessTodo {
   PrincessTodo(id: String, text: String, checked: Bool, depth: Int)
@@ -907,6 +936,265 @@ fn do_create_princess(
     Ok(id) -> Ok(id)
     Error(_) -> Error("could not read new callout id from response")
   }
+}
+
+// ─── checkmark (done-tasks callout) ────────────────────────────────────
+//
+// Convention: each Notion page can carry a ✅ callout as a sibling to
+// the 👸 empress callout. Completed empress todos get moved here via
+// `checkmark move` so the empress callout stays focused on open work
+// while completed items live in a scannable "done" list on the same
+// page.
+
+fn cmd_checkmark_ensure(page_id: String) -> Nil {
+  case with_client(fn(c) { ensure_checkmark(c, page_id) }) {
+    Ok(id) -> io.println(id)
+    Error(msg) -> die(msg)
+  }
+}
+
+fn ensure_checkmark(client: Client, page_id: String) -> Result(String, String) {
+  use children <- result.try(list_children_raw(client, page_id))
+  case find_callout_id_by_emoji(children, checkmark_emoji_variants()) {
+    Some(id) -> Ok(id)
+    None -> {
+      let after = find_callout_id_by_emoji(children, princess_emoji_variants())
+      create_checkmark(client, page_id, after)
+    }
+  }
+}
+
+fn find_callout_id_by_emoji(
+  children: List(Dynamic),
+  emojis: List(String),
+) -> Option(String) {
+  list.find_map(children, fn(block) {
+    case decode.run(block, callout_id_if_emoji_decoder(emojis)) {
+      Ok(Some(id)) -> Ok(id)
+      _ -> Error(Nil)
+    }
+  })
+  |> option_from_result
+}
+
+fn callout_id_if_emoji_decoder(
+  emojis: List(String),
+) -> decode.Decoder(Option(String)) {
+  use type_ <- decode.field("type", decode.string)
+  case type_ {
+    "callout" -> {
+      use emoji <- decode.optional_field(
+        "callout",
+        None,
+        callout_emoji_decoder(),
+      )
+      case emoji {
+        Some(e) ->
+          case list.contains(emojis, e) {
+            True -> {
+              use id <- decode.field("id", decode.string)
+              decode.success(Some(id))
+            }
+            False -> decode.success(None)
+          }
+        None -> decode.success(None)
+      }
+    }
+    _ -> decode.success(None)
+  }
+}
+
+fn create_checkmark(
+  client: Client,
+  page_id: String,
+  after: Option(String),
+) -> Result(String, String) {
+  let callout_block =
+    json.object([
+      #("object", json.string("block")),
+      #("type", json.string("callout")),
+      #(
+        "callout",
+        json.object([
+          #(
+            "rich_text",
+            json.preprocessed_array([
+              json.object([
+                #("type", json.string("text")),
+                #(
+                  "text",
+                  json.object([#("content", json.string("done"))]),
+                ),
+              ]),
+            ]),
+          ),
+          #(
+            "icon",
+            json.object([
+              #("type", json.string("emoji")),
+              #("emoji", json.string(checkmark_emoji)),
+            ]),
+          ),
+          #("color", json.string("green_background")),
+        ]),
+      ),
+    ])
+  let base_fields = [
+    #("children", json.preprocessed_array([callout_block])),
+  ]
+  let body_fields = case after {
+    Some(sib_id) -> [#("after", json.string(sib_id)), ..base_fields]
+    None -> base_fields
+  }
+  let req =
+    notion_client.base_request(client)
+    |> request.set_method(http.Patch)
+    |> request.set_path("/v1/blocks/" <> page_id <> "/children")
+    |> request.set_body(<<json.to_string(json.object(body_fields)):utf8>>)
+  use resp <- result.try(send_json(client, req))
+  case decode.run(resp, created_block_id_decoder()) {
+    Ok(id) -> Ok(id)
+    Error(_) -> Error("could not read new callout id from response")
+  }
+}
+
+fn cmd_checkmark_move(block_id: String) -> Nil {
+  case with_client(fn(c) { move_to_checkmark(c, block_id) }) {
+    Ok(id) -> io.println(id)
+    Error(msg) -> die(msg)
+  }
+}
+
+fn move_to_checkmark(client: Client, block_id: String) -> Result(String, String) {
+  use block_json <- result.try(get_json(client, "/v1/blocks/" <> block_id))
+  use _ <- result.try(case decode.run(block_json, block_type_decoder()) {
+    Ok("to_do") -> Ok(Nil)
+    Ok(other) ->
+      Error("block " <> block_id <> " is type \"" <> other <> "\", not to_do")
+    Error(_) -> Error("could not determine block type for " <> block_id)
+  })
+  use page_id <- result.try(resolve_page_id(client, block_json, block_id))
+  use text <- result.try(
+    decode.run(block_json, todo_text_decoder())
+    |> result.map_error(fn(_) { "could not read to_do text for " <> block_id }),
+  )
+  use checkmark_id <- result.try(ensure_checkmark(client, page_id))
+  use new_id <- result.try(append_done_todo(client, checkmark_id, text))
+  use _ <- result.try(archive_block(client, block_id))
+  Ok(new_id)
+}
+
+/// Walk parent pointers from `block_json` up to the first page-typed
+/// parent so `checkmark move` can be called with any todo id, whether
+/// it's a direct child of the page or nested under the empress callout
+/// (or arbitrarily deeper). The Notion `parent` field on a block is
+/// either `{type: "page_id", page_id}`, `{type: "block_id", block_id}`,
+/// or (rare here) a workspace / database parent — the last two get an
+/// explicit error so the caller sees why the move can't complete.
+fn resolve_page_id(
+  client: Client,
+  block_json: Dynamic,
+  starting_id: String,
+) -> Result(String, String) {
+  case decode.run(block_json, parent_ref_decoder()) {
+    Ok(PageParent(page_id)) -> Ok(page_id)
+    Ok(BlockParent(next_id)) -> {
+      use next_json <- result.try(get_json(client, "/v1/blocks/" <> next_id))
+      resolve_page_id(client, next_json, starting_id)
+    }
+    Ok(OtherParent(kind)) ->
+      Error(
+        "block "
+        <> starting_id
+        <> " ultimately parents into a "
+        <> kind
+        <> " — checkmark move only supports blocks under a page",
+      )
+    Error(_) ->
+      Error("could not read parent for block " <> starting_id)
+  }
+}
+
+type ParentRef {
+  PageParent(page_id: String)
+  BlockParent(block_id: String)
+  OtherParent(kind: String)
+}
+
+fn parent_ref_decoder() -> decode.Decoder(ParentRef) {
+  use type_ <- decode.subfield(["parent", "type"], decode.string)
+  case type_ {
+    "page_id" -> {
+      use id <- decode.subfield(["parent", "page_id"], decode.string)
+      decode.success(PageParent(id))
+    }
+    "block_id" -> {
+      use id <- decode.subfield(["parent", "block_id"], decode.string)
+      decode.success(BlockParent(id))
+    }
+    other -> decode.success(OtherParent(other))
+  }
+}
+
+fn todo_text_decoder() -> decode.Decoder(String) {
+  use rt <- decode.subfield(
+    ["to_do", "rich_text"],
+    decode.list(plain_text_decoder()),
+  )
+  decode.success(string.join(rt, ""))
+}
+
+fn append_done_todo(
+  client: Client,
+  parent_id: String,
+  text: String,
+) -> Result(String, String) {
+  let todo_block =
+    json.object([
+      #("object", json.string("block")),
+      #("type", json.string("to_do")),
+      #(
+        "to_do",
+        json.object([
+          #(
+            "rich_text",
+            json.preprocessed_array([
+              json.object([
+                #("type", json.string("text")),
+                #(
+                  "text",
+                  json.object([#("content", json.string(text))]),
+                ),
+              ]),
+            ]),
+          ),
+          #("checked", json.bool(True)),
+        ]),
+      ),
+    ])
+  let body =
+    json.object([
+      #("children", json.preprocessed_array([todo_block])),
+    ])
+  let req =
+    notion_client.base_request(client)
+    |> request.set_method(http.Patch)
+    |> request.set_path("/v1/blocks/" <> parent_id <> "/children")
+    |> request.set_body(<<json.to_string(body):utf8>>)
+  use resp <- result.try(send_json(client, req))
+  case decode.run(resp, created_block_id_decoder()) {
+    Ok(id) -> Ok(id)
+    Error(_) -> Error("could not read new to_do id from response")
+  }
+}
+
+fn archive_block(client: Client, block_id: String) -> Result(Nil, String) {
+  let req =
+    notion_client.base_request(client)
+    |> request.set_method(http.Delete)
+    |> request.set_path("/v1/blocks/" <> block_id)
+  use _ <- result.try(send_json(client, req))
+  Ok(Nil)
 }
 
 // ─── iframe (embed block append) ───────────────────────────────────────
