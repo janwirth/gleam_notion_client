@@ -39,12 +39,24 @@ import simplifile
 pub fn main() -> Nil {
   load_dotenv()
   case argv.load().arguments {
-    ["fetch"] -> cmd_fetch_env(None)
-    ["fetch", "-o", path] -> cmd_fetch_env(Some(path))
-    ["fetch", page_id] -> cmd_fetch(page_id, None)
-    ["fetch", page_id, "-o", path] -> cmd_fetch(page_id, Some(path))
+    ["fetch"] -> cmd_fetch_env(None, False)
+    ["fetch", "--empress-only"] -> cmd_fetch_env(None, True)
+    ["fetch", "-o", path] -> cmd_fetch_env(Some(path), False)
+    ["fetch", "--empress-only", "-o", path] -> cmd_fetch_env(Some(path), True)
+    ["fetch", "-o", path, "--empress-only"] -> cmd_fetch_env(Some(path), True)
+    ["fetch", page_id] -> cmd_fetch(page_id, None, False)
+    ["fetch", page_id, "--empress-only"] -> cmd_fetch(page_id, None, True)
+    ["fetch", "--empress-only", page_id] -> cmd_fetch(page_id, None, True)
+    ["fetch", page_id, "-o", path] -> cmd_fetch(page_id, Some(path), False)
+    ["fetch", page_id, "--empress-only", "-o", path] ->
+      cmd_fetch(page_id, Some(path), True)
+    ["fetch", page_id, "-o", path, "--empress-only"] ->
+      cmd_fetch(page_id, Some(path), True)
+    ["fetch", "--empress-only", page_id, "-o", path] ->
+      cmd_fetch(page_id, Some(path), True)
     ["check", block_id] -> cmd_check(block_id, True)
     ["check", block_id, "--uncheck"] -> cmd_check(block_id, False)
+    ["done", block_id] -> cmd_done(block_id)
     ["comment", "--block", block_id, ..rest] ->
       cmd_comment_block(block_id, string.join(rest, " "))
     ["comment", "-b", block_id, ..rest] ->
@@ -79,7 +91,7 @@ fn print_help() -> Nil {
 Designed to be composable from a shell or an agent.
 
 COMMANDS
-  fetch <page_id> [-o <path>]
+  fetch <page_id> [-o <path>] [--empress-only]
       Recursively fetch a Notion page and render as markdown.
       Every block is preceded by an HTML-invisible comment carrying
       its Notion block id:
@@ -90,6 +102,10 @@ COMMANDS
       Without -o: prints to stdout.
       With    -o: writes the file and prints the path on stdout.
       If <page_id> is omitted, falls back to $NOTION_PAGE_ID.
+      With --empress-only: don't recurse into the ✅ 'done' callout's
+      contents. The callout header still renders, but its list of
+      completed tasks stays folded so the fetched markdown reflects
+      only the open (empress) work.
 
   check <block_id> [--uncheck]
       Toggle a to_do block's checked state on Notion.
@@ -122,6 +138,12 @@ COMMANDS
       can be nested arbitrarily under the empress callout. Prints the
       new to_do's block id on success.
 
+  done <block_id>
+      Check the box and move it into the ✅ callout — sugar for
+      `check <id>` followed by `checkmark move <id>`. Use after
+      posting the done-comment so the completed item lands in the
+      'done' callout in one step. Prints the new to_do's block id.
+
   iframe <page_id> <url>   (alias: embed)
       Append a Notion `embed` block (rendered as an iframe) to the
       given page with the given URL. Prints the new block id on
@@ -146,13 +168,12 @@ COMMANDS
       without restarting.
 
 AGENT WORKFLOW
-  1. notion_cli fetch <page_id> -o page.md
+  1. notion_cli fetch <page_id> --empress-only -o page.md
   2. Read page.md. For any to_do line \"- [ ] ...\", the preceding
      line \"[//]: # (notion_block_id: <ID>)\" gives the block id.
      Grep: grep -B1 '^- \\[ \\]' page.md
-  3. notion_cli check <ID>
-  4. notion_cli comment --block <ID> \"Done: <what changed>\"
-  5. notion_cli checkmark move <ID>   (moves it into the ✅ callout)
+  3. notion_cli comment --block <ID> \"Done: <what changed>\"
+  4. notion_cli done <ID>   (checks the box + moves it into the ✅ callout)
 
 IDS
   Notion accepts either dashed UUIDs
@@ -190,9 +211,9 @@ SCOPE
   )
 }
 
-fn cmd_fetch_env(out: Option(String)) -> Nil {
+fn cmd_fetch_env(out: Option(String), empress_only: Bool) -> Nil {
   case envoy.get("NOTION_PAGE_ID") {
-    Ok(id) -> cmd_fetch(id, out)
+    Ok(id) -> cmd_fetch(id, out, empress_only)
     Error(_) ->
       die(
         "fetch: page_id missing — pass as argument or set NOTION_PAGE_ID",
@@ -202,8 +223,8 @@ fn cmd_fetch_env(out: Option(String)) -> Nil {
 
 // ─── fetch ──────────────────────────────────────────────────────────────
 
-fn cmd_fetch(page_id: String, out: Option(String)) -> Nil {
-  case with_client(fn(c) { do_fetch(c, page_id) }) {
+fn cmd_fetch(page_id: String, out: Option(String), empress_only: Bool) -> Nil {
+  case with_client(fn(c) { do_fetch(c, page_id, empress_only) }) {
     Error(msg) -> die(msg)
     Ok(md) ->
       case out {
@@ -217,12 +238,16 @@ fn cmd_fetch(page_id: String, out: Option(String)) -> Nil {
   }
 }
 
-fn do_fetch(client: Client, page_id: String) -> Result(String, String) {
+fn do_fetch(
+  client: Client,
+  page_id: String,
+  empress_only: Bool,
+) -> Result(String, String) {
   use page <- result.try(get_json(client, "/v1/pages/" <> page_id))
   let title =
     decode.run(page, title_decoder())
     |> result.unwrap("untitled")
-  use tree <- result.try(fetch_annotated(client, page_id))
+  use tree <- result.try(fetch_annotated(client, page_id, empress_only))
   let body = markdown.to_markdown_annotated(tree)
   Ok("# " <> title <> "\n\n" <> body <> "\n")
 }
@@ -230,17 +255,18 @@ fn do_fetch(client: Client, page_id: String) -> Result(String, String) {
 fn fetch_annotated(
   client: Client,
   parent_id: String,
+  empress_only: Bool,
 ) -> Result(List(AnnotatedBlock), String) {
   use entries <- result.try(fetch_children(client, parent_id))
   list.try_map(entries, fn(entry) {
-    let #(block, id, has_children) = entry
+    let #(raw, block, id, has_children) = entry
     case block {
       markdown.Table(_, _, _) ->
         case has_children {
           False -> Ok(AnnotatedBlock(id, block, []))
           True -> {
             use rows <- result.try(fetch_children(client, id))
-            let row_blocks = list.map(rows, fn(r) { r.0 })
+            let row_blocks = list.map(rows, fn(r) { r.1 })
             Ok(AnnotatedBlock(id, markdown.with_children(block, row_blocks), []))
           }
         }
@@ -248,10 +274,11 @@ fn fetch_annotated(
       markdown.ChildDatabase(_, _) -> Ok(AnnotatedBlock(id, block, []))
       markdown.SyncedBlock(_, _, _, _) -> Ok(AnnotatedBlock(id, block, []))
       _ ->
-        case has_children {
-          False -> Ok(AnnotatedBlock(id, block, []))
-          True -> {
-            use kids <- result.try(fetch_annotated(client, id))
+        case has_children, empress_only && is_checkmark_callout_raw(raw) {
+          _, True -> Ok(AnnotatedBlock(id, block, []))
+          False, _ -> Ok(AnnotatedBlock(id, block, []))
+          True, False -> {
+            use kids <- result.try(fetch_annotated(client, id, empress_only))
             Ok(AnnotatedBlock(id, block, kids))
           }
         }
@@ -259,10 +286,17 @@ fn fetch_annotated(
   })
 }
 
+fn is_checkmark_callout_raw(raw: Dynamic) -> Bool {
+  case decode.run(raw, callout_id_if_emoji_decoder(checkmark_emoji_variants())) {
+    Ok(Some(_)) -> True
+    _ -> False
+  }
+}
+
 fn fetch_children(
   client: Client,
   parent_id: String,
-) -> Result(List(#(Block, String, Bool)), String) {
+) -> Result(List(#(Dynamic, Block, String, Bool)), String) {
   use body <- result.try(get_json(
     client,
     "/v1/blocks/" <> parent_id <> "/children",
@@ -271,16 +305,17 @@ fn fetch_children(
   |> result.map_error(fn(_) { "decode children failed" })
 }
 
-fn children_decoder() -> decode.Decoder(List(#(Block, String, Bool))) {
+fn children_decoder() -> decode.Decoder(List(#(Dynamic, Block, String, Bool))) {
   use results <- decode.field("results", decode.list(block_entry_decoder()))
   decode.success(results)
 }
 
-fn block_entry_decoder() -> decode.Decoder(#(Block, String, Bool)) {
+fn block_entry_decoder() -> decode.Decoder(#(Dynamic, Block, String, Bool)) {
+  use raw <- decode.then(decode.dynamic)
   use b <- decode.then(markdown.block_decoder())
   use id <- decode.field("id", decode.string)
   use has_children <- decode.field("has_children", decode.optional(decode.bool))
-  decode.success(#(b, id, option.unwrap(has_children, False)))
+  decode.success(#(raw, b, id, option.unwrap(has_children, False)))
 }
 
 // ─── check ──────────────────────────────────────────────────────────────
@@ -554,7 +589,7 @@ fn do_find_princess(
       // Excluded: `to_do` children (already carried structured in
       // `todos`) and per-todo nested children (subagents fetch those
       // via `notion_cli fetch` when they pick up a todo).
-      use annotated <- result.try(fetch_annotated(client, callout_id))
+      use annotated <- result.try(fetch_annotated(client, callout_id, False))
       let body =
         annotated
         |> list.filter(fn(ab) { !is_todo_block(ab.block) })
@@ -1063,6 +1098,18 @@ fn cmd_checkmark_move(block_id: String) -> Nil {
     Ok(id) -> io.println(id)
     Error(msg) -> die(msg)
   }
+}
+
+fn cmd_done(block_id: String) -> Nil {
+  case with_client(fn(c) { do_done(c, block_id) }) {
+    Ok(id) -> io.println(id)
+    Error(msg) -> die(msg)
+  }
+}
+
+fn do_done(client: Client, block_id: String) -> Result(String, String) {
+  use _ <- result.try(do_check(client, block_id, True))
+  move_to_checkmark(client, block_id)
 }
 
 fn move_to_checkmark(client: Client, block_id: String) -> Result(String, String) {
