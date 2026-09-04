@@ -514,7 +514,7 @@ fn checkmark_emoji_variants() -> List(String) {
 }
 
 type PrincessTodo {
-  PrincessTodo(id: String, text: String, checked: Bool, depth: Int)
+  PrincessTodo(id: String, text: String, checked: Bool, depth: Int, note: String)
 }
 
 type PrincessResult {
@@ -714,6 +714,16 @@ fn collect_todos_recursive(
     case decode.run(block, block_id_and_children_decoder()) {
       Ok(#(id, True)) -> {
         use sub <- result.try(list_children_raw(client, id))
+        // A to_do's own non-to_do children (plain paragraphs, bullets,
+        // etc.) are clarifying notes written under the checkbox rather
+        // than sub-tasks — fold them into `note` so they travel with
+        // the todo everywhere princess JSON is consumed (empress UI +
+        // the Let's-rule prompt), instead of only being visible via a
+        // separate `notion_cli fetch`.
+        let this = case this {
+          [t] -> [PrincessTodo(..t, note: non_todo_note(sub))]
+          other -> other
+        }
         use nested <- result.try(collect_todos_recursive(
           client,
           sub,
@@ -725,6 +735,34 @@ fn collect_todos_recursive(
       _ -> Ok(list.flatten([acc, this]))
     }
   })
+}
+
+/// Render a to_do's non-to_do child blocks (paragraphs, bullets,
+/// headings, etc.) as plain joined text. to_do children are excluded
+/// since those are sub-tasks already surfaced as their own
+/// `PrincessTodo` entries by the recursive walk.
+fn non_todo_note(children: List(Dynamic)) -> String {
+  children
+  |> list.filter_map(fn(block) {
+    case decode.run(block, block_type_decoder()) {
+      Ok("to_do") -> Error(Nil)
+      Ok(t) ->
+        case decode.run(block, rich_text_field_decoder(t)) {
+          Ok(text) if text != "" -> Ok(text)
+          _ -> Error(Nil)
+        }
+      _ -> Error(Nil)
+    }
+  })
+  |> string.join("\n")
+}
+
+fn rich_text_field_decoder(block_type: String) -> decode.Decoder(String) {
+  use rt <- decode.subfield(
+    [block_type, "rich_text"],
+    decode.list(plain_text_decoder()),
+  )
+  decode.success(string.join(rt, ""))
 }
 
 fn block_id_and_children_decoder() -> decode.Decoder(#(String, Bool)) {
@@ -762,6 +800,7 @@ fn todo_decoder(
             text: string.join(text, ""),
             checked: c,
             depth: depth,
+            note: "",
           )))
       }
     }
@@ -796,6 +835,7 @@ fn princess_to_json(r: PrincessResult) -> String {
                   #("text", json.string(t.text)),
                   #("checked", json.bool(t.checked)),
                   #("depth", json.int(t.depth)),
+                  #("note", json.string(t.note)),
                 ])
               }),
             ),
@@ -820,7 +860,16 @@ fn princess_to_text(r: PrincessResult) -> String {
                 True -> "- [x] "
                 False -> "- [ ] "
               }
-              string.repeat("  ", t.depth) <> box <> t.id <> " " <> t.text
+              let note_suffix = case string.trim(t.note) {
+                "" -> ""
+                n -> "\n" <> string.repeat("  ", t.depth + 1) <> n
+              }
+              string.repeat("  ", t.depth)
+              <> box
+              <> t.id
+              <> " "
+              <> t.text
+              <> note_suffix
             }),
             "\n",
           )
