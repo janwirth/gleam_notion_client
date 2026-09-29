@@ -1,0 +1,1 @@
+-record(lookup_error, {message :: binary()}).
