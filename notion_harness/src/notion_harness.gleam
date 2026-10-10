@@ -26,13 +26,13 @@ pub const usage_instructions: String = "notion_cli (on PATH). IDs: dashed or 32-
       from any non-todo child block written under that checkbox.
   princess create <page_id>           create 👸 callout, prints id (appended at end).
 
-WORKFLOW: fetch --empress-only -o page.md -> grep -B1 '^- \\[ \\]' for ids ->
-comment --block ID \"Working on…\" -> implement/verify -> pass: comment
---block ID \"Done: …\" then check ID  |  fail: leave unchecked, comment
---block ID \"Blocked: …\"  |  unclear: comment question, leave unchecked.
-There is no `checkmark`/`done` subcommand — checking the box is enough;
-move it into a done callout manually in Notion if you keep one.
-Independent todos: parallel subagents, one per todo/cluster.
+WORKFLOW: fetch --empress-only -o page.md; identify each todo's block ID.
+Before starting each task: empress-status start BLOCK_ID \"Task name: next step.\"
+At a meaningful milestone: empress-status progress BLOCK_ID \"Concrete status.\"
+After verification: empress-status done BLOCK_ID \"Result and verification.\" then check ID.
+On blocker: empress-status blocked BLOCK_ID \"Blocker and needed decision.\"; leave unchecked.
+One comment per task, edited in place. Never use notion_cli comment for task status.
+Keep each update at most two short sentences. Never start work from polling.
 
 ENV: NOTION_TOKEN (required), NOTION_PAGE_ID, NOTION_API_VERSION.
 Exit 0 ok, 1 error.
