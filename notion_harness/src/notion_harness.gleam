@@ -29,9 +29,11 @@ pub const usage_instructions: String = "notion_cli (on PATH). IDs: dashed or 32-
 WORKFLOW: fetch --empress-only -o page.md; identify each todo's block ID.
 Before starting each task: empress-status start BLOCK_ID \"Task name: next step.\"
 At a meaningful milestone: empress-status progress BLOCK_ID \"Concrete status.\"
-After verification: empress-status done BLOCK_ID \"Result and verification.\" then check ID.
-On blocker: empress-status blocked BLOCK_ID \"Blocker and needed decision.\"; leave unchecked.
-One comment per task, edited in place. Never use notion_cli comment for task status.
+After verification and opening a task-branch PR: empress-status done BLOCK_ID \"Result and PR link.\" then check ID.
+For a user decision: empress-status waiting BLOCK_ID \"Concise questions.\"; leave unchecked and stop dependent work.
+On operational blocker: empress-status blocked BLOCK_ID \"Blocker and needed decision.\"; leave unchecked.
+One comment per task, edited in place. Never include block IDs in comment text.
+Never use notion_cli comment for task status. Never push directly to the default branch.
 Keep each update at most two short sentences. Never start work from polling.
 
 ENV: NOTION_TOKEN (required), NOTION_PAGE_ID, NOTION_API_VERSION.
